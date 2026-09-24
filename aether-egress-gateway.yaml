@@ -1,0 +1,6 @@
+name: "projects/your-gcp-project-id/locations/us-central1/agentGateways/aether-ingress-agw"
+description: "Agent Gateway for Aether Ops & Deployer Agents"
+protocols:
+  - "MCP"
+googleManaged:
+  governedAccessPath: "CLIENT_TO_AGENT"

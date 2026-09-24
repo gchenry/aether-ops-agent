@@ -13,8 +13,7 @@ COPY --chown=aether:aether app/ app/
 
 USER aether
 
-# EXPOSE is kept as a best practice but Cloud Run ignores it in favor of the dynamic PORT env variable
-EXPOSE 8080
+EXPOSE 8081
 
 # 🚀 Dynamic port binding using the $PORT environment variable
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
+CMD ["sh", "-c", "uvicorn app.deployer:app --host 0.0.0.0 --port ${PORT:-8081}"]

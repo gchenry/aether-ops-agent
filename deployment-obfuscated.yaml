@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aether-gateway-service
+  namespace: production
+spec:
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app: gateway
+    spec:
+      hostNetwork: true  # ❌ VULNERABILITY 1: Bypasses container network isolation (Gemini will catch this)
+      containers:
+      - name: proxy
+        image: gcr.io/aether-prod/reverse-proxy:v1.2
+        securityContext:
+          privileged: true  # ❌ VULNERABILITY 2: Dangerous container breakout capability
+        env:
+        # ❌ VULNERABILITY 3: Obfuscated API Key named creatively to bypass simple regex scanners
+        - name: SYS_CONN_HASH_VAL_EXT
+          value: "AIzaSyD-ObfuscatedKeyThatRegexScannersMiss"
+        
+        # ❌ VULNERABILITY 4: Base64 encoded secret block (Plaintext value: "admin:supersecretpassword")
+        - name: BOOTSTRAP_UPSTREAM_AUTH
+          value: "Basic YWRtaW46c3VwZXJzZWNyZXRwYXNzd29yZA=="
+
+---
+apiVersion: networking.gke.io/v1
+kind: Ingress
+metadata:
+  name: admin-ingress
+spec:
+  rules:
+  - http:
+      paths:
+      # ❌ VULNERABILITY 5: Exposing debugging shell endpoint publicly to everyone
+      - path: /internal/debug-shell
+        pathType: Prefix
+        backend:
+          service:
+            name: proxy
+            port:
+              number: 8080
+  securityPolicy:
+    allowUsers: "allUsers"  # Wildcard access to sensitive system commands
