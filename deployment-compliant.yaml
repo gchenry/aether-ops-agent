@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aether-payment-service
+  namespace: production
+spec:
+  replicas: 3
+  template:
+    metadata:
+      labels:
+        app: payment-processor
+    spec:
+      containers:
+      - name: payment-api
+        image: gcr.io/aether-prod/payment-api:v2.4.1
+        ports:
+        - containerPort: 8080
+        env:
+        # ✅ HARDENING: Secret resolved securely from Secret Manager at runtime
+        - name: STRIPE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: stripe-secrets
+              key: stripe-api-key

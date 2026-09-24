@@ -1,10 +1,12 @@
 import os
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
-    PROJECT_ID: str = os.getenv("PROJECT_ID", "aether-demo-project")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    PROJECT_ID: str = os.getenv("PROJECT_ID", "your-gcp-project-id")
     LOCATION: str = os.getenv("LOCATION", "us-central1")
-    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
     SESSION_STORE_URI: str = os.getenv("SESSION_STORE_URI", "memory://local")
     ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
     ENFORCE_SPIFFE_AUTH: bool = os.getenv("ENFORCE_SPIFFE_AUTH", "true").lower() == "true"
