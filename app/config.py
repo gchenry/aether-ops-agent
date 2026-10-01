@@ -10,7 +10,9 @@ class Settings(BaseSettings):
     SESSION_STORE_URI: str = os.getenv("SESSION_STORE_URI", "memory://local")
     ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
     ENFORCE_SPIFFE_AUTH: bool = os.getenv("ENFORCE_SPIFFE_AUTH", "true").lower() == "true"
+    ENFORCE_MTLS: bool = os.getenv("ENFORCE_MTLS", "true").lower() == "true"
     EXPECTED_SPIFFE_ID: str = os.getenv("EXPECTED_SPIFFE_ID", "spiffe://aether.internal/ns/devops/sa/release-gate")
+    MTLS_CERT_DIR: str = os.getenv("MTLS_CERT_DIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "certs")))
     PORT: int = int(os.getenv("PORT", "8080"))
 
 settings = Settings()

@@ -1,23 +1,26 @@
 """
 Aether Deployer Agent: Downstream Executor Service (Port 8081).
-Enforces zero-trust using SPIFFE Workload Identity validation.
+Enforces zero-trust using Mutual TLS (mTLS X.509-SVID + Cloud Load Balancer ServerTlsPolicy)
+and SPIFFE Workload Identity JWT validation.
 """
 
+import os
+import ssl
 from fastapi import FastAPI, Header, HTTPException, status
 from pydantic import BaseModel
 import jwt
+from app.mtls import ensure_mtls_certificates, verify_mtls_client_identity
 
 # 1. Initialize the FastAPI Application first
 app = FastAPI(
     title="Aether Deployer Agent",
-    description="Secured downstream deployment execution endpoint."
+    description="Secured downstream deployment execution endpoint with Mutual TLS (mTLS)."
 )
-
-import os
 
 # 2. Configuration Parameters
 EXPECTED_CALLER_SPIFFE = "spiffe://aether.internal/ns/devops/sa/release-gate"
 HMAC_SECRET = os.getenv("HMAC_SECRET", "aether-super-secure-demo-secret-key-32-bytes").strip()
+ENFORCE_MTLS = os.getenv("ENFORCE_MTLS", "true").lower() == "true"
 
 
 # 3. Define Pydantic Models for validation
@@ -32,7 +35,9 @@ def health_check():
     return {
         "status": "healthy",
         "service": "aether-deployer-agent",
-        "expected_caller": EXPECTED_CALLER_SPIFFE
+        "expected_caller": EXPECTED_CALLER_SPIFFE,
+        "mtls_enforced": ENFORCE_MTLS,
+        "trust_domain": "spiffe://aether.internal",
     }
 
 
@@ -42,8 +47,13 @@ def execute_deployment(
     authorization: str = Header(None),
     x_goog_agent_gateway: str = Header(None),
     x_goog_agent_registry_endpoint: str = Header(None),
+    x_client_cert_present: str = Header(None),
+    x_client_cert_chain_verified: str = Header(None),
+    x_client_cert_uri_sans: str = Header(None),
+    x_client_cert_sha256_fingerprint: str = Header(None),
+    x_client_cert_pem_b64: str = Header(None),
 ):
-    # Enforce SPIFFE identity check on incoming traffic
+    # 1. Enforce SPIFFE JWT identity check on incoming traffic
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -57,31 +67,70 @@ def execute_deployment(
         decoded = jwt.decode(token, HMAC_SECRET, algorithms=["HS256"])
         spiffe_id = decoded.get("spiffe_id")
         
-        print(f"🔒 [Deployer Interceptor] Authenticated SPIFFE ID: {spiffe_id} | Agent Gateway: {x_goog_agent_gateway}")
-        
         if spiffe_id != EXPECTED_CALLER_SPIFFE:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Authorization Failed: SPIFFE identity '{spiffe_id}' is not authorized to deploy to this cluster."
             )
-            
-        return {
-            "status": "DEPLOYED",
-            "deployment_id": "dep-994821",
-            "cluster": payload.target_cluster,
-            "agent_gateway": x_goog_agent_gateway or "projects/your-gcp-project-id/locations/us-central1/agentGateways/aether-ingress-agw",
-            "registry_endpoint": x_goog_agent_registry_endpoint or "projects/000000000000/locations/us-central1/endpoints/agentregistry-00000000-0000-0000-0000-000000000000",
-            "message": f"Successfully deployed {payload.artifact_id}."
-        }
-        
     except jwt.PyJWTError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Cryptographic identity verification failed: {str(e)}"
         )
 
+    # 2. Enforce Mutual TLS (mTLS) X.509-SVID & Cloud Load Balancer ServerTlsPolicy verification
+    mtls_info = {
+        "mtls_verified": False,
+        "verification_mode": "DISABLED",
+        "client_cert_uri_san": None,
+        "client_cert_fingerprint": None,
+    }
+    if ENFORCE_MTLS:
+        mtls_info = verify_mtls_client_identity(
+            expected_spiffe_id=EXPECTED_CALLER_SPIFFE,
+            x_client_cert_present=x_client_cert_present,
+            x_client_cert_chain_verified=x_client_cert_chain_verified,
+            x_client_cert_uri_sans=x_client_cert_uri_sans,
+            x_client_cert_sha256_fingerprint=x_client_cert_sha256_fingerprint,
+            x_client_cert_pem_b64=x_client_cert_pem_b64,
+        )
+
+    print(
+        f"🔒 [Deployer Interceptor] Authenticated SPIFFE ID: {spiffe_id} | "
+        f"mTLS Verified: {mtls_info['mtls_verified']} ({mtls_info['verification_mode']}) | "
+        f"Cert FP: {mtls_info['client_cert_fingerprint']} | "
+        f"Agent Gateway: {x_goog_agent_gateway}"
+    )
+
+    return {
+        "status": "DEPLOYED",
+        "deployment_id": "dep-994821",
+        "cluster": payload.target_cluster,
+        "mtls_verified": mtls_info["mtls_verified"],
+        "mtls_verification_mode": mtls_info["verification_mode"],
+        "client_cert_uri_san": mtls_info["client_cert_uri_san"],
+        "client_cert_fingerprint": mtls_info["client_cert_fingerprint"],
+        "agent_gateway": x_goog_agent_gateway or "projects/your-gcp-project-id/locations/us-central1/agentGateways/aether-ingress-agw",
+        "registry_endpoint": x_goog_agent_registry_endpoint or "projects/your-gcp-project-id/locations/us-central1/endpoints/agentregistry-00000000-0000-0000-0000-000000000000",
+        "message": f"Successfully deployed {payload.artifact_id}."
+    }
+
 
 # 5. Application Entrypoint
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app.deployer:app", host="0.0.0.0", port=8081)
+    port = int(os.getenv("PORT", "8081"))
+    enable_socket_mtls = os.getenv("ENABLE_SOCKET_MTLS", "false").lower() == "true"
+    if enable_socket_mtls:
+        cert_paths = ensure_mtls_certificates()
+        uvicorn.run(
+            "app.deployer:app",
+            host="0.0.0.0",
+            port=port,
+            ssl_keyfile=str(cert_paths["server_key"]),
+            ssl_certfile=str(cert_paths["server_cert"]),
+            ssl_ca_certs=str(cert_paths["ca_cert"]),
+            ssl_cert_reqs=ssl.CERT_REQUIRED,
+        )
+    else:
+        uvicorn.run("app.deployer:app", host="0.0.0.0", port=port)

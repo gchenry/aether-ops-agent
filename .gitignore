@@ -9,10 +9,14 @@ env/
 venv/
 ENV/
 deployment-vulnerable.yaml
-# Environment Variables & Secrets
+# Environment Variables, Secrets & Generated Certificates
 .env
 *.pem
 *.key
+certs/*.crt
+certs/*.key
+certs/*.yaml
+!certs/.gitkeep
 
 # Testing & Coverage
 .pytest_cache/

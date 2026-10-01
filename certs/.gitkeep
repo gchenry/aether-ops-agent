@@ -1,0 +1,1 @@
+# Generated SPIFFE X.509-SVID certificates and GCP mTLS YAML configs are placed here by ./generate_mtls_certs.py

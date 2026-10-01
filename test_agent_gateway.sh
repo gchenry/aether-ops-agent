@@ -3,8 +3,8 @@
 set -e
 export PYTHONWARNINGS="ignore"
 
-PROJECT_ID="your-gcp-project-id"
-PROJECT_NUMBER="000000000000"
+PROJECT_ID="${PROJECT_ID:-your-gcp-project-id}"
+PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)" 2>/dev/null || echo "000000000000")
 REGION="us-central1"
 GATEWAY_NAME="aether-ingress-agw"
 AUTHZ_EXT_NAME="aether-iap-authz-ext"

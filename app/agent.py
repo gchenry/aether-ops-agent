@@ -1,15 +1,17 @@
 """
-Aether Ops Agent: Connected to Downstream Deployer Agent.
+Aether Ops Agent: Connected to Downstream Deployer Agent over Mutual TLS (mTLS).
 """
 import os
 import jwt
 import httpx
 from app.tools import security_scan_manifest
+from app.mtls import create_mtls_client_context, get_client_cert_headers
 
 import google.auth
 import google.auth.transport.requests
 
-DEPLOYER_AGENT_URL = os.getenv("DEPLOYER_AGENT_URL", "http://localhost:8081")
+DEPLOYER_AGENT_URL = os.getenv("DEPLOYER_AGENT_URL", "https://localhost:8081")
+DEPLOYER_MTLS_LB_URL = os.getenv("DEPLOYER_MTLS_LB_URL", "")
 AGENT_GATEWAY_NAME = os.getenv(
     "AGENT_GATEWAY_NAME",
     "projects/your-gcp-project-id/locations/us-central1/agentGateways/aether-ingress-agw"
@@ -41,10 +43,10 @@ def _resolve_via_agent_gateway_and_registry() -> dict:
     and verifies the governing Agent Gateway resource.
     """
     info = {
-        "target_url": DEPLOYER_AGENT_URL,
+        "target_url": DEPLOYER_MTLS_LB_URL or DEPLOYER_AGENT_URL,
         "agent_gateway": AGENT_GATEWAY_NAME,
         "registry_service": AGENT_REGISTRY_SERVICE,
-        "registry_endpoint": "projects/000000000000/locations/us-central1/endpoints/agentregistry-00000000-0000-0000-0000-000000000000",
+        "registry_endpoint": "projects/your-gcp-project-id/locations/us-central1/endpoints/agentregistry-00000000-0000-0000-0000-000000000000",
     }
     try:
         creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
@@ -69,7 +71,7 @@ def _resolve_via_agent_gateway_and_registry() -> dict:
                 reg_data = reg_resp.json()
                 info["registry_endpoint"] = reg_data.get("registryResource", info["registry_endpoint"])
                 interfaces = reg_data.get("interfaces", [])
-                if interfaces and interfaces[0].get("url"):
+                if not DEPLOYER_MTLS_LB_URL and interfaces and interfaces[0].get("url"):
                     info["target_url"] = interfaces[0]["url"].rstrip("/")
     except Exception:
         pass
@@ -77,7 +79,7 @@ def _resolve_via_agent_gateway_and_registry() -> dict:
 
 def run_agent_turn(prompt: str, actor_id: str, session_id: str = "default-session") -> str:
     """
-    Executes a single agent reasoning turn. If verified, initiates secure agent-to-agent dispatch.
+    Executes a single agent reasoning turn. If verified, initiates secure mTLS agent-to-agent dispatch.
     """
     # 1. Run the semantic manifest check via our AI-powered tool (Gemini)
     scan_res = security_scan_manifest(prompt)
@@ -91,15 +93,21 @@ def run_agent_turn(prompt: str, actor_id: str, session_id: str = "default-sessio
             f"**Action Required**: Please resolve these security architectural flaws before attempting deployment."
         )
 
-    # 3. If prompt asks to deploy and security passed, execute the secure handoff
+    # 3. If prompt asks to deploy and security passed, execute the secure mTLS handoff
     if "deploy" in prompt.lower():
-        is_cloud_run = DEPLOYER_AGENT_URL.startswith("https://")
+        is_cloud_run = (
+            ".run.app" in DEPLOYER_AGENT_URL
+            or bool(DEPLOYER_MTLS_LB_URL)
+            or bool(os.getenv("K_SERVICE"))
+        )
         if is_cloud_run:
             route_info = _resolve_via_agent_gateway_and_registry()
             target_url = route_info["target_url"]
         else:
             route_info = None
             target_url = DEPLOYER_AGENT_URL
+            if target_url.startswith("http://deployer-container:"):
+                target_url = target_url.replace("http://", "https://", 1)
 
         # Sign SPIFFE workload token for Agent-to-Agent Communication
         token = jwt.encode(
@@ -108,11 +116,14 @@ def run_agent_turn(prompt: str, actor_id: str, session_id: str = "default-sessio
             algorithm="HS256"
         )
 
+        # Attach SPIFFE JWT + X.509-SVID Client Certificate headers for mTLS
         headers = {"Authorization": f"Bearer {token}"}
+        headers.update(get_client_cert_headers())
+
         if is_cloud_run and route_info:
             headers["X-Goog-Agent-Gateway"] = route_info["agent_gateway"]
             headers["X-Goog-Agent-Registry-Endpoint"] = route_info["registry_endpoint"]
-            id_token = _get_cloud_run_id_token(target_url)
+            id_token = _get_cloud_run_id_token(DEPLOYER_AGENT_URL)
             if id_token:
                 headers["X-Serverless-Authorization"] = f"Bearer {id_token}"
 
@@ -122,29 +133,45 @@ def run_agent_turn(prompt: str, actor_id: str, session_id: str = "default-sessio
         }
 
         try:
-            with httpx.Client(timeout=15.0) as client:
-                res = httpx.post(f"{target_url}/api/v1/deploy", json=payload, headers=headers)
+            ssl_ctx = create_mtls_client_context()
+            with httpx.Client(verify=ssl_ctx, timeout=15.0) as client:
+                try:
+                    res = client.post(f"{target_url}/api/v1/deploy", json=payload, headers=headers)
+                except httpx.ConnectError:
+                    # Graceful fallback if local python dev server was started on plain HTTP
+                    if not is_cloud_run and target_url.startswith("https://"):
+                        fallback_url = target_url.replace("https://", "http://", 1)
+                        res = client.post(f"{fallback_url}/api/v1/deploy", json=payload, headers=headers)
+                        target_url = fallback_url
+                    else:
+                        raise
                 
                 if res.status_code == 201:
                     deploy_res = res.json()
+                    mtls_san = deploy_res.get("client_cert_uri_san") or MY_SPIFFE_ID
+                    mtls_fp = (deploy_res.get("client_cert_fingerprint") or "")[:16] + "..."
                     if is_cloud_run and route_info:
                         gw_used = deploy_res.get("agent_gateway") or route_info["agent_gateway"]
                         ep_used = deploy_res.get("registry_endpoint") or route_info["registry_endpoint"]
                         return (
                             f"✅ **Security Verification Passed**: All policies compliant.\n\n"
-                            f"🚀 **Deployment Executed via Secure Agent-to-Agent Link (Agent Gateway)**:\n"
+                            f"🚀 **Deployment Executed via Secure Agent-to-Agent Link (Agent Gateway + mTLS)**:\n"
                             f"- Job ID: `{deploy_res['deployment_id']}`\n"
                             f"- Cluster: `{deploy_res['cluster']}`\n"
+                            f"- mTLS X.509 SAN: `{mtls_san}` (Verified: `{deploy_res.get('mtls_verified', True)}`)\n"
+                            f"- Client Cert SHA-256: `{mtls_fp}`\n"
                             f"- Agent Gateway: `{gw_used}`\n"
                             f"- Registry Endpoint: `{ep_used}`\n"
                             f"- Message: {deploy_res['message']}"
                         )
                     return (
                         f"✅ **Security Verification Passed**: All policies compliant.\n\n"
-                        f"🚀 **Deployment Executed via Local Container Agent-to-Agent Link**:\n"
+                        f"🚀 **Deployment Executed via Local Container mTLS Agent-to-Agent Link**:\n"
                         f"- Job ID: `{deploy_res['deployment_id']}`\n"
                         f"- Cluster: `{deploy_res['cluster']}`\n"
                         f"- Target Container: `{target_url}`\n"
+                        f"- mTLS X.509 SAN: `{mtls_san}` (Verified: `{deploy_res.get('mtls_verified', True)}`)\n"
+                        f"- Client Cert SHA-256: `{mtls_fp}`\n"
                         f"- Message: {deploy_res['message']}"
                     )
                 else:

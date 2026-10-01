@@ -10,10 +10,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 RUN useradd -m -u 8888 aether && chown -R aether:aether /app
 COPY --chown=aether:aether app/ app/
+COPY --chown=aether:aether generate_mtls_certs.py .
+COPY --chown=aether:aether certs/ certs/
 
 USER aether
 
 EXPOSE 8081
 
-# 🚀 Dynamic port binding using the $PORT environment variable
-CMD ["sh", "-c", "uvicorn app.deployer:app --host 0.0.0.0 --port ${PORT:-8081}"]
+# 🚀 Enforce socket-level mTLS (--ssl-cert-reqs 2) in standalone/Docker mode, or Cloud LB mTLS headers on Cloud Run ($K_SERVICE)
+CMD ["sh", "-c", "python3 generate_mtls_certs.py >/dev/null && if [ -z \"$K_SERVICE\" ] && [ \"${ENABLE_SOCKET_MTLS:-true}\" = \"true\" ]; then uvicorn app.deployer:app --host 0.0.0.0 --port ${PORT:-8081} --ssl-keyfile /app/certs/deployer-server.key --ssl-certfile /app/certs/deployer-server.crt --ssl-ca-certs /app/certs/ca.crt --ssl-cert-reqs 2; else uvicorn app.deployer:app --host 0.0.0.0 --port ${PORT:-8081}; fi"]
