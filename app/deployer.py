@@ -10,11 +10,12 @@ from fastapi import FastAPI, Header, HTTPException, status
 from pydantic import BaseModel
 import jwt
 from app.mtls import ensure_mtls_certificates, verify_mtls_client_identity
+from app.abac import evaluate_abac_policy
 
 # 1. Initialize the FastAPI Application first
 app = FastAPI(
     title="Aether Deployer Agent",
-    description="Secured downstream deployment execution endpoint with Mutual TLS (mTLS)."
+    description="Secured downstream deployment execution endpoint with Mutual TLS (mTLS) and ABAC."
 )
 
 # 2. Configuration Parameters
@@ -27,6 +28,9 @@ ENFORCE_MTLS = os.getenv("ENFORCE_MTLS", "true").lower() == "true"
 class DeploymentPayload(BaseModel):
     artifact_id: str
     target_cluster: str
+    environment: str = "production"
+    data_classification: str = "production-release"
+    model_armor_status: str = "CLEAN"
 
 
 # 4. Define HTTP Routes
@@ -37,6 +41,7 @@ def health_check():
         "service": "aether-deployer-agent",
         "expected_caller": EXPECTED_CALLER_SPIFFE,
         "mtls_enforced": ENFORCE_MTLS,
+        "abac_enforced": True,
         "trust_domain": "spiffe://aether.internal",
     }
 
@@ -47,6 +52,7 @@ def execute_deployment(
     authorization: str = Header(None),
     x_goog_agent_gateway: str = Header(None),
     x_goog_agent_registry_endpoint: str = Header(None),
+    x_aether_gate_attestation: str = Header(None),
     x_client_cert_present: str = Header(None),
     x_client_cert_chain_verified: str = Header(None),
     x_client_cert_uri_sans: str = Header(None),
@@ -66,11 +72,15 @@ def execute_deployment(
         # Decode and verify the SPIFFE token
         decoded = jwt.decode(token, HMAC_SECRET, algorithms=["HS256"])
         spiffe_id = decoded.get("spiffe_id")
+        role = decoded.get("role", "admin")
         
         if spiffe_id != EXPECTED_CALLER_SPIFFE:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Authorization Failed: SPIFFE identity '{spiffe_id}' is not authorized to deploy to this cluster."
+                detail=(
+                    f"[OWASP ASI02: Tool Misuse / Shadow AI Blocked] Authorization Failed: "
+                    f"SPIFFE identity '{spiffe_id}' is not authorized to deploy to this cluster."
+                )
             )
     except jwt.PyJWTError as e:
         raise HTTPException(
@@ -95,9 +105,24 @@ def execute_deployment(
             x_client_cert_pem_b64=x_client_cert_pem_b64,
         )
 
+    # 3. Enforce Attribute-Based Access Control (ABAC: Identity + Environment + Data Context)
+    abac_res = evaluate_abac_policy(
+        spiffe_id=spiffe_id,
+        role=role,
+        mtls_verified=mtls_info["mtls_verified"],
+        client_cert_uri_san=mtls_info["client_cert_uri_san"],
+        environment=payload.environment,
+        target_cluster=payload.target_cluster,
+        artifact_id=payload.artifact_id,
+        data_classification=payload.data_classification,
+        model_armor_status=payload.model_armor_status,
+        gate_attestation=x_aether_gate_attestation,
+    )
+
     print(
         f"🔒 [Deployer Interceptor] Authenticated SPIFFE ID: {spiffe_id} | "
         f"mTLS Verified: {mtls_info['mtls_verified']} ({mtls_info['verification_mode']}) | "
+        f"ABAC Decision: {abac_res['decision']} | "
         f"Cert FP: {mtls_info['client_cert_fingerprint']} | "
         f"Agent Gateway: {x_goog_agent_gateway}"
     )
@@ -110,6 +135,9 @@ def execute_deployment(
         "mtls_verification_mode": mtls_info["verification_mode"],
         "client_cert_uri_san": mtls_info["client_cert_uri_san"],
         "client_cert_fingerprint": mtls_info["client_cert_fingerprint"],
+        "abac_decision": abac_res["decision"],
+        "abac_policy_id": abac_res["policy_id"],
+        "abac_attributes": abac_res["attributes_verified"],
         "agent_gateway": x_goog_agent_gateway or "projects/your-gcp-project-id/locations/us-central1/agentGateways/aether-ingress-agw",
         "registry_endpoint": x_goog_agent_registry_endpoint or "projects/your-gcp-project-id/locations/us-central1/endpoints/agentregistry-00000000-0000-0000-0000-000000000000",
         "message": f"Successfully deployed {payload.artifact_id}."

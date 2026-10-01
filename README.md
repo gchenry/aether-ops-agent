@@ -1,30 +1,36 @@
 # Aether Ops: Autonomous Security & Release Gate Agent
+### *Reference Architecture for "Vibe Coding Hangover: Securing Agentic AI with Zero-Trust Architecture"*
 
-A production-ready reference architecture demonstrating how to build, evaluate, containerize, and securely govern multi-agent workflows using **Python ADK**, **Gemini 3.8**, **Google Cloud Run**, **Mutual TLS (mTLS) with SPIFFE X.509-SVIDs**, **Google Cloud Certificate Manager (`TrustConfig`)**, **Network Security (`ServerTlsPolicy`)**, **Cloud Run Agent Identity**, **Agent Registry**, and **Google Cloud Agent Gateway** with **IAP v2 Authorization Policies**.
+A production-ready reference architecture demonstrating how to build, evaluate, containerize, and securely govern multi-agent workflows using **Python ADK**, **Gemini Enterprise (3.8)**, **Google Cloud Model Armor**, **Security Command Center (SCC) & Wiz Telemetry**, **Attribute-Based Access Control (ABAC)**, **Mutual TLS (mTLS) with SPIFFE X.509-SVIDs**, **Google Cloud Certificate Manager (`TrustConfig`)**, **Network Security (`ServerTlsPolicy`)**, **Cloud Run Agent Identity**, **Agent Registry**, and **Google Cloud Agent Gateway** with **IAP v2 Authorization Policies**.
 
 ---
 
 ## Security & Architecture Features
-* **Stateless Runtimes**: Scales to zero on Cloud Run with decoupled session memory.
-* **Semantic AI Policy Gate**: Uses Gemini (`gemini-3.8-flash`) to audit Kubernetes/GKE manifests for hardcoded secrets, obfuscated credentials, container breakout risks (`privileged: true`), network isolation bypasses (`hostNetwork: true`), and exposed public admin routes (`allUsers`).
+* **Defending Against OWASP Top 10 for Agentic Applications (2026)**:
+  * **ASI01: Agent Goal Hijacking Defense**: Uses **Google Cloud Model Armor** (`model_armor_screen_input`) + **Gemini 3.8** to intercept indirect prompt injections hidden inside YAML manifests (`deployment-goal-hijack.yaml`) and emit real-time posture findings to **Security Command Center (SCC)** and **Wiz**.
+  * **ASI02: Tool Misuse & Shadow AI Defense**: Blocks unauthorized "Shadow AI" sub-agents and direct unattested tool calls using cryptographic Security Gate attestations (`X-Aether-Gate-Attestation`), **Mutual TLS (mTLS)**, and **Attribute-Based Access Control (ABAC)**.
+* **Attribute-Based Access Control (ABAC) Policy Engine ([`app/abac.py`](app/abac.py))**:
+  * Dynamically authorizes runtime tool execution based on **1) Agent Identity** (`spiffe_id` + X.509-SVID SAN), **2) Environmental Constraints** (`environment`, `model_armor_status == CLEAN`, and verified Gate Attestation), and **3) Fine-Grained Data Context** (`data_classification` and `target_cluster` blast radius).
 * **Triple-Layer Zero-Trust Authentication & Mutual TLS (mTLS)**:
   * **Transport Layer (Mutual TLS / SPIFFE X.509-SVIDs)**:
     * **Production (Google Cloud Load Balancer + Certificate Manager `TrustConfig` + `ServerTlsPolicy`)**: Terminates mTLS at Google's edge with `clientValidationMode: REJECT_INVALID`, validates the caller's X.509-SVID certificate chain against the `spiffe://aether.internal` Root CA, and injects sanitized identity headers (`X-Client-Cert-Present`, `X-Client-Cert-Chain-Verified`, `X-Client-Cert-Uri-Sans`, `X-Client-Cert-Sha256-Fingerprint`) to Cloud Run.
     * **Local Container Runtime (Socket-Level TLS 1.3 mTLS)**: `deployer-container` runs with `ssl.CERT_REQUIRED` (`--ssl-cert-reqs 2`) against `certs/ca.crt`, while `ops-container` presents its client X.509-SVID (`certs/ops-client.crt` with SAN URI `spiffe://aether.internal/ns/devops/sa/release-gate`) over `https://deployer-container:8081`.
   * **Infrastructure Layer (Cloud Run Agent Identity & Agent Gateway)**: Cryptographically attested SPIFFE principals (`principal://agents.global.org-...`) governed by Google Cloud Agent Gateway, Agent Registry, and Identity-Aware Proxy (`roles/iap.egressor` + `roles/run.invoker`).
-  * **Application Layer (SPIFFE JWT + X.509 SAN Assertion)**: Signed RFC 7518 HS256 SPIFFE Workload Tokens (`spiffe://aether.internal/ns/devops/sa/release-gate`) verified alongside the caller's X.509 Subject Alternative Name (SAN) URI and Cloud Run `X-Serverless-Authorization` OIDC tokens.
+  * **Application Layer (SPIFFE JWT + X.509 SAN + ABAC)**: Signed RFC 7518 HS256 SPIFFE Workload Tokens (`spiffe://aether.internal/ns/devops/sa/release-gate`) verified alongside the caller's X.509 Subject Alternative Name (SAN) URI and ABAC context.
 
 ---
 
-## Summary of Mutual TLS (mTLS) Architecture Changes
+## Summary of Zero-Trust, mTLS & ABAC Architecture Components
 
 | Component | File | Purpose |
 | :--- | :--- | :--- |
+| **ABAC Policy Engine** | [`app/abac.py`](app/abac.py) | Evaluates Agent Identity, Environmental Constraints, and Data Context at the tool boundary; prevents OWASP ASI02 Tool Misuse and blocks Shadow AI sub-agents. |
+| **Model Armor & Semantic Auditor** | [`app/tools.py`](app/tools.py) | Screens manifests for OWASP ASI01 (Agent Goal Hijacking) via Model Armor + Gemini 3.8 and emits findings for Security Command Center (SCC) and Wiz. |
 | **mTLS & X.509-SVID Engine** | [`app/mtls.py`](app/mtls.py) | Generates the `spiffe://aether.internal` Root CA, Ops Client X.509-SVID, and Deployer Server X.509-SVID; builds the client `ssl.SSLContext`; and verifies both X.509 certificate chains and GCP Load Balancer `X-Client-Cert-*` headers. |
 | **PKI & GCP Policy Generator** | [`generate_mtls_certs.py`](generate_mtls_certs.py) | Generates `certs/*.crt`, `certs/*.key`, `certs/trust-config.yaml` (Certificate Manager), and `certs/server-tls-policy.yaml` (Network Security). |
-| **Upstream Ops Agent (mTLS Client)** | [`app/agent.py`](app/agent.py) | Configures `httpx.Client` with the X.509-SVID client certificate (`ops-client.crt` + `ops-client.key`) and Root CA bundle (`ca.crt`), and attaches mTLS attestation headers. |
-| **Downstream Deployer (mTLS Server)** | [`app/deployer.py`](app/deployer.py) | Enforces `verify_mtls_client_identity()` on `/api/v1/deploy`, verifying the caller's X.509-SVID SAN URI (`spiffe://aether.internal/ns/devops/sa/release-gate`) and Cloud Load Balancer headers. |
-| **Deployer Container Runtime** | [`Dockerfile.deployer`](Dockerfile.deployer) | Enforces socket-level mTLS (`--ssl-cert-reqs 2`) in local Docker containers while supporting Cloud Load Balancer mTLS termination on Cloud Run (`$K_SERVICE`). |
+| **Upstream Ops Agent (mTLS Client)** | [`app/agent.py`](app/agent.py) | Configures `httpx.Client` with the X.509-SVID client certificate (`ops-client.crt` + `ops-client.key`) and Root CA bundle (`ca.crt`), and attaches mTLS + ABAC attestation headers. |
+| **Downstream Deployer (mTLS + ABAC Server)** | [`app/deployer.py`](app/deployer.py) | Enforces `verify_mtls_client_identity()` and `evaluate_abac_policy()` on `/api/v1/deploy`. |
+| **Masterclass Live Teardown** | [`run_vibe_teardown.sh`](run_vibe_teardown.sh) | Executes the 2-part Vulnerability Teardown (ASI01 Goal Hijacking + ASI02 Tool Misuse) and Solution Blueprint (Model Armor + mTLS + ABAC). |
 
 ---
 
@@ -93,10 +99,11 @@ docker run -d --name ops-container \
 ### Run Local Container Demo & mTLS Verification Scripts
 Each `run_demo_*.sh` script targets the local container (`http://localhost:8080` $\rightarrow$ `https://deployer-container:8081` over mTLS):
 ```bash
-./run_demo_1.sh   # Demo 1: Rejects deployment-vulnerable.yaml
-./run_demo_2.sh   # Demo 2: Approves deployment-compliant.yaml & dispatches over mTLS to deployer-container
-./run_demo_3.sh   # Demo 3: Semantic audit rejects deployment-obfuscated.yaml
-./test_mtls.sh    # Full mTLS verification: tests TLS handshake rejection without client cert & acceptance with X.509-SVID
+./run_vibe_teardown.sh # SF Tech Week 2026 Masterclass: 2-Part Vulnerability Teardown (ASI01 & ASI02) + ABAC/mTLS Blueprint
+./run_demo_1.sh        # Demo 1: Rejects deployment-vulnerable.yaml
+./run_demo_2.sh        # Demo 2: Approves deployment-compliant.yaml & dispatches over mTLS + ABAC to deployer-container
+./run_demo_3.sh        # Demo 3: Semantic audit rejects deployment-obfuscated.yaml
+./test_mtls.sh         # Full mTLS verification: tests TLS handshake rejection without client cert & acceptance with X.509-SVID
 ```
 
 ---

@@ -6,6 +6,7 @@ import jwt
 import httpx
 from app.tools import security_scan_manifest
 from app.mtls import create_mtls_client_context, get_client_cert_headers
+from app.abac import compute_gate_attestation
 
 import google.auth
 import google.auth.transport.requests
@@ -79,21 +80,28 @@ def _resolve_via_agent_gateway_and_registry() -> dict:
 
 def run_agent_turn(prompt: str, actor_id: str, session_id: str = "default-session") -> str:
     """
-    Executes a single agent reasoning turn. If verified, initiates secure mTLS agent-to-agent dispatch.
+    Executes a single agent reasoning turn. If verified, initiates secure mTLS + ABAC agent-to-agent dispatch.
     """
-    # 1. Run the semantic manifest check via our AI-powered tool (Gemini)
+    # 1. Run the semantic manifest check via Model Armor + Gemini 3.8
     scan_res = security_scan_manifest(prompt)
+    armor_status = scan_res.get("model_armor_status", "CLEAN")
+    scc_telemetry = scan_res.get("scc_telemetry", "POLICY_VIOLATION_DETECTED")
+    wiz_posture = scan_res.get("wiz_posture", "HIGH_RISK_MANIFEST_BLOCKED")
     
-    # 2. If Gemini auditor finds a policy violation, format and return them
+    # 2. If Model Armor or Gemini auditor finds a policy violation, format and return them
     if scan_res.get("status") == "FAILED":
         violations = "\n".join([f"- {finding}" for finding in scan_res.get("findings", [])])
         return (
             f"⚠️ **Security Gate Rejected**: Vulnerabilities detected in manifest:\n"
             f"{violations}\n\n"
+            f"🛡️ **Telemetry Emitted**:\n"
+            f"- Google Cloud Model Armor: `{armor_status}`\n"
+            f"- Security Command Center (SCC): `{scc_telemetry}`\n"
+            f"- Wiz Cloud Posture Issue: `{wiz_posture}`\n\n"
             f"**Action Required**: Please resolve these security architectural flaws before attempting deployment."
         )
 
-    # 3. If prompt asks to deploy and security passed, execute the secure mTLS handoff
+    # 3. If prompt asks to deploy and security passed, execute the secure mTLS + ABAC handoff
     if "deploy" in prompt.lower():
         is_cloud_run = (
             ".run.app" in DEPLOYER_AGENT_URL
@@ -116,8 +124,24 @@ def run_agent_turn(prompt: str, actor_id: str, session_id: str = "default-sessio
             algorithm="HS256"
         )
 
-        # Attach SPIFFE JWT + X.509-SVID Client Certificate headers for mTLS
-        headers = {"Authorization": f"Bearer {token}"}
+        artifact_id = "gcr.io/aether/agent:v2.4"
+        target_cluster = "us-central1-prod"
+        data_classification = "production-release"
+
+        # Compute cryptographic Security Gate attestation (prevents OWASP ASI02 Tool Misuse)
+        gate_attestation = compute_gate_attestation(
+            spiffe_id=MY_SPIFFE_ID,
+            artifact_id=artifact_id,
+            target_cluster=target_cluster,
+            data_classification=data_classification,
+            model_armor_status=armor_status,
+        )
+
+        # Attach SPIFFE JWT + X.509-SVID Client Certificate headers + ABAC Gate Attestation
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-Aether-Gate-Attestation": gate_attestation,
+        }
         headers.update(get_client_cert_headers())
 
         if is_cloud_run and route_info:
@@ -128,8 +152,11 @@ def run_agent_turn(prompt: str, actor_id: str, session_id: str = "default-sessio
                 headers["X-Serverless-Authorization"] = f"Bearer {id_token}"
 
         payload = {
-            "artifact_id": "gcr.io/aether/agent:v2.4",
-            "target_cluster": "us-central1-prod"
+            "artifact_id": artifact_id,
+            "target_cluster": target_cluster,
+            "environment": "production",
+            "data_classification": data_classification,
+            "model_armor_status": armor_status,
         }
 
         try:
@@ -150,14 +177,16 @@ def run_agent_turn(prompt: str, actor_id: str, session_id: str = "default-sessio
                     deploy_res = res.json()
                     mtls_san = deploy_res.get("client_cert_uri_san") or MY_SPIFFE_ID
                     mtls_fp = (deploy_res.get("client_cert_fingerprint") or "")[:16] + "..."
+                    abac_decision = deploy_res.get("abac_decision", "ALLOW")
                     if is_cloud_run and route_info:
                         gw_used = deploy_res.get("agent_gateway") or route_info["agent_gateway"]
                         ep_used = deploy_res.get("registry_endpoint") or route_info["registry_endpoint"]
                         return (
-                            f"✅ **Security Verification Passed**: All policies compliant.\n\n"
-                            f"🚀 **Deployment Executed via Secure Agent-to-Agent Link (Agent Gateway + mTLS)**:\n"
+                            f"✅ **Security Verification Passed**: All policies compliant (Model Armor: `{armor_status}`).\n\n"
+                            f"🚀 **Deployment Executed via Secure Agent-to-Agent Link (Agent Gateway + mTLS + ABAC)**:\n"
                             f"- Job ID: `{deploy_res['deployment_id']}`\n"
                             f"- Cluster: `{deploy_res['cluster']}`\n"
+                            f"- ABAC Verdict: `{abac_decision}` (Identity + Environment + Data Scope: `{data_classification}`)\n"
                             f"- mTLS X.509 SAN: `{mtls_san}` (Verified: `{deploy_res.get('mtls_verified', True)}`)\n"
                             f"- Client Cert SHA-256: `{mtls_fp}`\n"
                             f"- Agent Gateway: `{gw_used}`\n"
@@ -165,11 +194,12 @@ def run_agent_turn(prompt: str, actor_id: str, session_id: str = "default-sessio
                             f"- Message: {deploy_res['message']}"
                         )
                     return (
-                        f"✅ **Security Verification Passed**: All policies compliant.\n\n"
-                        f"🚀 **Deployment Executed via Local Container mTLS Agent-to-Agent Link**:\n"
+                        f"✅ **Security Verification Passed**: All policies compliant (Model Armor: `{armor_status}`).\n\n"
+                        f"🚀 **Deployment Executed via Local Container mTLS + ABAC Agent-to-Agent Link**:\n"
                         f"- Job ID: `{deploy_res['deployment_id']}`\n"
                         f"- Cluster: `{deploy_res['cluster']}`\n"
                         f"- Target Container: `{target_url}`\n"
+                        f"- ABAC Verdict: `{abac_decision}` (Identity + Environment + Data Scope: `{data_classification}`)\n"
                         f"- mTLS X.509 SAN: `{mtls_san}` (Verified: `{deploy_res.get('mtls_verified', True)}`)\n"
                         f"- Client Cert SHA-256: `{mtls_fp}`\n"
                         f"- Message: {deploy_res['message']}"
@@ -181,6 +211,6 @@ def run_agent_turn(prompt: str, actor_id: str, session_id: str = "default-sessio
             return f"❌ Connection to Downstream Deployer Agent failed: {str(e)}"
 
     return (
-        f"✅ **Security Verification Passed**: All policies compliant.\n\n"
+        f"✅ **Security Verification Passed**: All policies compliant (Model Armor: `{armor_status}`).\n\n"
         f"Manifest is clean and ready for deployment."
     )
