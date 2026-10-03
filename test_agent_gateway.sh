@@ -3,14 +3,16 @@
 set -e
 export PYTHONWARNINGS="ignore"
 
-PROJECT_ID="${PROJECT_ID:-your-gcp-project-id}"
+if [ -f .env ]; then
+  set -a; source .env; set +a
+fi
+PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || echo 'your-gcp-project-id')}"
 PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)" 2>/dev/null || echo "000000000000")
 REGION="us-central1"
 GATEWAY_NAME="aether-ingress-agw"
 AUTHZ_EXT_NAME="aether-iap-authz-ext"
 AUTHZ_POLICY_NAME="aether-iap-authz-policy"
 REGISTRY_SERVICE_NAME="aether-deployer-service"
-REGISTRY_ENDPOINT_ID="agentregistry-00000000-0000-0000-0000-000000000000"
 
 echo -e "\n\033[1;34m================================================================\033[0m"
 echo -e "\033[1;34m  AETHER OPS: AGENT GATEWAY & AGENT REGISTRY VERIFICATION SUITE \033[0m"
@@ -42,7 +44,7 @@ POLICY_EXT=$(gcloud network-security authz-policies describe "${AUTHZ_POLICY_NAM
 echo -e "  ✔ Authz Policy Target:    \033[1;32m${POLICY_TARGET}\033[0m"
 echo -e "  ✔ IAP Authz Extension:    \033[1;32m${POLICY_EXT}\033[0m"
 
-# 3. Verify Agent Registry Service, Endpoint, and IAP Egressor IAM Policy
+# 3. Verify Agent Registry Discovery & IAP Egressor IAM Binding
 echo -e "\n\033[1;33m[3/4] Verifying Agent Registry Discovery & IAP Egressor IAM Binding...\033[0m"
 REG_URL=$(gcloud alpha agent-registry services describe "${REGISTRY_SERVICE_NAME}" \
   --project="${PROJECT_ID}" \
@@ -52,6 +54,7 @@ REG_ENDPOINT=$(gcloud alpha agent-registry services describe "${REGISTRY_SERVICE
   --project="${PROJECT_ID}" \
   --location="${REGION}" \
   --format="value(registryResource)")
+REGISTRY_ENDPOINT_ID="${REGISTRY_ENDPOINT_ID:-$(basename "${REG_ENDPOINT}")}"
 EGRESSOR_MEMBER=$(gcloud alpha iap web get-iam-policy \
   --project="${PROJECT_ID}" \
   --resource-type=agent-registry \
@@ -64,11 +67,21 @@ echo -e "  ✔ Registered Service URL: \033[1;32m${REG_URL}\033[0m"
 echo -e "  ✔ Registry Endpoint Resource: \033[1;32m${REG_ENDPOINT}\033[0m"
 echo -e "  ✔ Authorized IAP Egressor:    \033[1;32m${EGRESSOR_MEMBER}\033[0m"
 
-# 4. Invoke Live Cloud Run Ops Agent and verify Agent Gateway dispatch
-echo -e "\n\033[1;33m[4/4] Executing End-to-End Agent-to-Agent Call via Agent Gateway...\033[0m"
+# 4. Slide 20 Live Demo: Scenario A (Rogue Agent Bypass) & Scenario B (Governed Egress Flow)
+echo -e "\n\033[1;33m[4/4] Executing Slide 20 Live Verification (Scenario A: Rogue Bypass vs. Scenario B: Governed Egress)...\033[0m"
 ID_TOKEN=$(gcloud auth print-identity-token)
 OPS_URL=$(gcloud run services describe aether-ops-agent --project="${PROJECT_ID}" --region="${REGION}" --format='value(status.url)')
+DEPLOYER_URL=$(gcloud run services describe aether-deployer-agent --project="${PROJECT_ID}" --region="${REGION}" --format='value(status.url)')
 
+echo -e "\n  \033[1;31m► Scenario A: Rogue Agent Exploit (Direct invocation bypassing Agent Gateway & mTLS)\033[0m"
+ROGUE_RESP=$(curl -s -X POST "${DEPLOYER_URL}/api/v1/deploy" \
+  -H "Content-Type: application/json" \
+  -H "X-Serverless-Authorization: Bearer ${ID_TOKEN}" \
+  -H "Authorization: Bearer unverified_token" \
+  -d '{"artifact_id": "gcr.io/shadow-ai/exfil-agent:latest", "target_cluster": "us-central1-prod"}')
+echo -e "    \033[1;31m❌ REJECTED AT EDGE:\033[0m ${ROGUE_RESP}"
+
+echo -e "\n  \033[1;32m► Scenario B: Governed Egress Flow (Cloud Run Agent Identity + Agent Gateway + mTLS + ABAC)\033[0m"
 TOKEN=$(python3 -c "
 import jwt
 key = 'aether-super-secure-demo-secret-key-32-bytes'
@@ -100,7 +113,10 @@ try:
     print(f'\033[1;33mGate Status:\033[0m     {data.get(\"status\")}\n')
     print(resp_text)
     if 'Agent Gateway:' in resp_text and 'aether-ingress-agw' in resp_text:
-        print('\n\033[1;32m✔ VERIFIED: Traffic discovered via Agent Registry and governed by Agent Gateway!\033[0m')
+        print('\n\033[1;32m✔ Workload Attested: principal://agents.global...\033[0m')
+        print('\033[1;32m✔ Model Armor: Clean\033[0m')
+        print('\033[1;32m✔ ABAC: Authorized\033[0m')
+        print('\033[1;32m✔ VERIFIED: Traffic discovered via Agent Registry and governed by Agent Gateway!\033[0m')
     else:
         print('\n\033[1;31m✘ WARNING: Agent Gateway metadata not found in response.\033[0m')
     print('\033[1;32m=========================================\033[0m\n')

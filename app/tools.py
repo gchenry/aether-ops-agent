@@ -1,5 +1,5 @@
 """
-Semantic Security Audit Tools powered by Gemini 3.8.
+Semantic Security Audit Tools built with Gemini models (Gemini Enterprise 3.8).
 """
 import os
 import json

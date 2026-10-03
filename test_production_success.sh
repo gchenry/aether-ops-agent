@@ -2,7 +2,10 @@
 # Silence cryptography warnings
 export PYTHONWARNINGS="ignore"
 
-PROJECT_ID="your-gcp-project-id"
+if [ -f .env ]; then
+  set -a; source .env; set +a
+fi
+PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || echo 'your-gcp-project-id')}"
 REGION="us-central1"
 
 # 1. Generate an authenticated SPIFFE token

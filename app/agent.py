@@ -4,6 +4,7 @@ Aether Ops Agent: Connected to Downstream Deployer Agent over Mutual TLS (mTLS).
 import os
 import jwt
 import httpx
+from app.config import settings
 from app.tools import security_scan_manifest
 from app.mtls import create_mtls_client_context, get_client_cert_headers
 from app.abac import compute_gate_attestation
@@ -11,15 +12,16 @@ from app.abac import compute_gate_attestation
 import google.auth
 import google.auth.transport.requests
 
+PROJECT_ID = os.getenv("PROJECT_ID", settings.PROJECT_ID)
 DEPLOYER_AGENT_URL = os.getenv("DEPLOYER_AGENT_URL", "https://localhost:8081")
 DEPLOYER_MTLS_LB_URL = os.getenv("DEPLOYER_MTLS_LB_URL", "")
 AGENT_GATEWAY_NAME = os.getenv(
     "AGENT_GATEWAY_NAME",
-    "projects/your-gcp-project-id/locations/us-central1/agentGateways/aether-ingress-agw"
+    f"projects/{PROJECT_ID}/locations/us-central1/agentGateways/aether-ingress-agw"
 )
 AGENT_REGISTRY_SERVICE = os.getenv(
     "AGENT_REGISTRY_SERVICE",
-    "projects/your-gcp-project-id/locations/us-central1/services/aether-deployer-service"
+    f"projects/{PROJECT_ID}/locations/us-central1/services/aether-deployer-service"
 )
 HMAC_SECRET = os.getenv("HMAC_SECRET", "aether-super-secure-demo-secret-key-32-bytes").strip()
 MY_SPIFFE_ID = "spiffe://aether.internal/ns/devops/sa/release-gate"
@@ -47,7 +49,10 @@ def _resolve_via_agent_gateway_and_registry() -> dict:
         "target_url": DEPLOYER_MTLS_LB_URL or DEPLOYER_AGENT_URL,
         "agent_gateway": AGENT_GATEWAY_NAME,
         "registry_service": AGENT_REGISTRY_SERVICE,
-        "registry_endpoint": "projects/your-gcp-project-id/locations/us-central1/endpoints/agentregistry-00000000-0000-0000-0000-000000000000",
+        "registry_endpoint": os.getenv(
+            "AGENT_REGISTRY_ENDPOINT",
+            f"projects/{PROJECT_ID}/locations/us-central1/endpoints/agentregistry-00000000-0000-0000-0000-000000000000",
+        ),
     }
     try:
         creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])

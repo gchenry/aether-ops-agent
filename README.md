@@ -1,16 +1,19 @@
 # Aether Ops: Autonomous Security & Release Gate Agent
 ### *Reference Architecture for "Vibe Coding Hangover: Securing Agentic AI with Zero-Trust Architecture"*
 
-A production-ready reference architecture demonstrating how to build, evaluate, containerize, and securely govern multi-agent workflows using **Python ADK**, **Gemini Enterprise (3.8)**, **Google Cloud Model Armor**, **Security Command Center (SCC) & Wiz Telemetry**, **Attribute-Based Access Control (ABAC)**, **Mutual TLS (mTLS) with SPIFFE X.509-SVIDs**, **Google Cloud Certificate Manager (`TrustConfig`)**, **Network Security (`ServerTlsPolicy`)**, **Cloud Run Agent Identity**, **Agent Registry**, and **Google Cloud Agent Gateway** with **IAP v2 Authorization Policies**.
+A production-ready reference architecture demonstrating how to build, evaluate, containerize, and securely govern multi-agent workflows built with **Gemini models** (**Gemini Enterprise 3.8**), **Python ADK**, **Google Cloud Security**, **Google Cloud Model Armor**, **Security Command Center (SCC) & Wiz AI-APP Telemetry**, the **3Cs Framework (Contain, Curate, Control)**, **Attribute-Based Access Control (ABAC)**, **Mutual TLS (mTLS) with SPIFFE X.509-SVIDs**, **Google Cloud Certificate Manager (`TrustConfig`)**, **Network Security (`ServerTlsPolicy`)**, **Cloud Run Agent Identity**, **Agent Registry**, and **Google Cloud Agent Gateway** with **IAP v2 Authorization Policies**.
 
 ---
 
 ## Security & Architecture Features
 * **Defending Against OWASP Top 10 for Agentic Applications (2026)**:
-  * **ASI01: Agent Goal Hijacking Defense**: Uses **Google Cloud Model Armor** (`model_armor_screen_input`) + **Gemini 3.8** to intercept indirect prompt injections hidden inside YAML manifests (`deployment-goal-hijack.yaml`) and emit real-time posture findings to **Security Command Center (SCC)** and **Wiz**.
-  * **ASI02: Tool Misuse & Shadow AI Defense**: Blocks unauthorized "Shadow AI" sub-agents and direct unattested tool calls using cryptographic Security Gate attestations (`X-Aether-Gate-Attestation`), **Mutual TLS (mTLS)**, and **Attribute-Based Access Control (ABAC)**.
-* **Attribute-Based Access Control (ABAC) Policy Engine ([`app/abac.py`](app/abac.py))**:
-  * Dynamically authorizes runtime tool execution based on **1) Agent Identity** (`spiffe_id` + X.509-SVID SAN), **2) Environmental Constraints** (`environment`, `model_armor_status == CLEAN`, and verified Gate Attestation), and **3) Fine-Grained Data Context** (`data_classification` and `target_cluster` blast radius).
+  * **Hero #1 (`ASI01` Agent Goal Hijacking & `ASI06` Memory Poisoning)**: Uses **Google Cloud Model Armor** (`model_armor_screen_input`) + **Gemini 3.8** to intercept indirect prompt injections hidden inside YAML manifests (`deployment-goal-hijack.yaml`), quarantine poisoned inputs before they can contaminate session memory (`app/memory.py`), and emit real-time posture findings to **Security Command Center (SCC)** and **Wiz AI-APP**.
+  * **Hero #2 (`ASI02` Tool Misuse & `ASI03` Identity/Privilege Abuse)**: Blocks unauthorized "Shadow AI" Non-Human Identities (NHI) and direct unattested tool calls using cryptographic Security Gate attestations (`X-Aether-Gate-Attestation`), **Mutual TLS (mTLS)**, and **Attribute-Based Access Control (ABAC)**.
+  * **The Cascade (`ASI08` Cascading Failures & `ASI09` Human-Agent Trust Abuse)**: Enforces a multi-agent swarm blast-radius circuit breaker (`max_swarm_depth=2`) and requires a cryptographically signed **Human-in-the-Loop (HITL)** approval token (`X-Aether-HITL-Token`) for `critical-destructive` mutations.
+* **The 3Cs Framework & ABAC Policy Engine ([`app/abac.py`](app/abac.py))**:
+  * **CONTAIN**: Non-Human Identity (`spiffe_id`) + mTLS X.509-SVID binding (`ASI03`, `ASI07`).
+  * **CURATE**: Model Armor cleanliness (`ASI01`), Context Memory Quarantine (`ASI06`), Security Gate Attestation (`ASI02`), and Swarm Circuit Breaker (`ASI08`).
+  * **CONTROL**: Tenant isolation (`tenant_id`), Data Classification (`data_classification`), Cluster Blast Radius (`target_cluster`), and HITL enforcement (`ASI09`).
 * **Triple-Layer Zero-Trust Authentication & Mutual TLS (mTLS)**:
   * **Transport Layer (Mutual TLS / SPIFFE X.509-SVIDs)**:
     * **Production (Google Cloud Load Balancer + Certificate Manager `TrustConfig` + `ServerTlsPolicy`)**: Terminates mTLS at Google's edge with `clientValidationMode: REJECT_INVALID`, validates the caller's X.509-SVID certificate chain against the `spiffe://aether.internal` Root CA, and injects sanitized identity headers (`X-Client-Cert-Present`, `X-Client-Cert-Chain-Verified`, `X-Client-Cert-Uri-Sans`, `X-Client-Cert-Sha256-Fingerprint`) to Cloud Run.
@@ -20,17 +23,18 @@ A production-ready reference architecture demonstrating how to build, evaluate, 
 
 ---
 
-## Summary of Zero-Trust, mTLS & ABAC Architecture Components
+## Summary of Zero-Trust, mTLS & 3Cs Architecture Components
 
 | Component | File | Purpose |
 | :--- | :--- | :--- |
-| **ABAC Policy Engine** | [`app/abac.py`](app/abac.py) | Evaluates Agent Identity, Environmental Constraints, and Data Context at the tool boundary; prevents OWASP ASI02 Tool Misuse and blocks Shadow AI sub-agents. |
+| **3Cs & ABAC Policy Engine** | [`app/abac.py`](app/abac.py) | Enforces **Contain** (NHI + mTLS), **Curate** (Model Armor, Gate Attestation, Swarm Circuit Breaker), and **Control** (Tenant, Data Scope, HITL) at the tool boundary. |
 | **Model Armor & Semantic Auditor** | [`app/tools.py`](app/tools.py) | Screens manifests for OWASP ASI01 (Agent Goal Hijacking) via Model Armor + Gemini 3.8 and emits findings for Security Command Center (SCC) and Wiz. |
+| **Context Boundary & Memory Store** | [`app/memory.py`](app/memory.py) | Enforces bounded sliding context windows and quarantines injection payloads before persistence to prevent OWASP ASI06 (Memory Poisoning). |
 | **mTLS & X.509-SVID Engine** | [`app/mtls.py`](app/mtls.py) | Generates the `spiffe://aether.internal` Root CA, Ops Client X.509-SVID, and Deployer Server X.509-SVID; builds the client `ssl.SSLContext`; and verifies both X.509 certificate chains and GCP Load Balancer `X-Client-Cert-*` headers. |
 | **PKI & GCP Policy Generator** | [`generate_mtls_certs.py`](generate_mtls_certs.py) | Generates `certs/*.crt`, `certs/*.key`, `certs/trust-config.yaml` (Certificate Manager), and `certs/server-tls-policy.yaml` (Network Security). |
 | **Upstream Ops Agent (mTLS Client)** | [`app/agent.py`](app/agent.py) | Configures `httpx.Client` with the X.509-SVID client certificate (`ops-client.crt` + `ops-client.key`) and Root CA bundle (`ca.crt`), and attaches mTLS + ABAC attestation headers. |
 | **Downstream Deployer (mTLS + ABAC Server)** | [`app/deployer.py`](app/deployer.py) | Enforces `verify_mtls_client_identity()` and `evaluate_abac_policy()` on `/api/v1/deploy`. |
-| **Masterclass Live Teardown** | [`run_vibe_teardown.sh`](run_vibe_teardown.sh) | Executes the 2-part Vulnerability Teardown (ASI01 Goal Hijacking + ASI02 Tool Misuse) and Solution Blueprint (Model Armor + mTLS + ABAC). |
+| **301 Live Teardown Script** | [`run_vibe_teardown.sh`](run_vibe_teardown.sh) | Executes Hero #1 (`ASI01`/`ASI06`), Hero #2 (`ASI02`/`ASI03`), The Cascade (`ASI08`/`ASI09`), and The 3Cs Production Blueprint. |
 
 ---
 
@@ -90,7 +94,7 @@ docker run -d --name ops-container \
   -v "${HOME}/.config/gcloud:/tmp/gcloud:ro" \
   -e GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcloud/application_default_credentials.json \
   -e DEPLOYER_AGENT_URL=https://deployer-container:8081 \
-  -e PROJECT_ID=your-gcp-project-id \
+  -e PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project)}" \
   -e LOCATION=global \
   -e GEMINI_MODEL=gemini-3.8-flash \
   aether-ops-agent:latest
@@ -114,7 +118,7 @@ When deploying to Cloud Run with `--functional-type="agent"` and `--identity-typ
 
 ### Step 3.1: Build & Push Container Images to Artifact Registry
 ```bash
-PROJECT_ID="your-gcp-project-id"
+PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project)}"
 REGION="us-central1"
 REPO_NAME="aether-repo"
 
@@ -134,7 +138,7 @@ docker push us-central1-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/aether-ops-age
 Because `--identity-type="agent-identity"` uses the service's `principal://` identity at startup to read Secret Manager secrets and invoke Vertex AI, grant the required permissions directly to the Agent Identity principals:
 
 ```bash
-PROJECT_ID="your-gcp-project-id"
+PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project)}"
 REGION="us-central1"
 
 # Dynamically fetch Project Number and Organization ID
@@ -175,8 +179,8 @@ gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
 ```bash
 # 1. Deploy Downstream Aether Deployer Agent (with mTLS enforcement enabled)
 gcloud beta run deploy aether-deployer-agent \
-  --project="your-gcp-project-id" \
-  --image="us-central1-docker.pkg.dev/your-gcp-project-id/aether-repo/aether-deployer-agent:latest" \
+  --project="${PROJECT_ID}" \
+  --image="us-central1-docker.pkg.dev/${PROJECT_ID}/aether-repo/aether-deployer-agent:latest" \
   --region="us-central1" \
   --platform="managed" \
   --functional-type="agent" \
@@ -187,26 +191,26 @@ gcloud beta run deploy aether-deployer-agent \
 
 # 2. Grant Cloud Run Invoker on Deployer Agent to the Ops Agent Identity
 gcloud beta run services add-iam-policy-binding aether-deployer-agent \
-  --project="your-gcp-project-id" \
+  --project="${PROJECT_ID}" \
   --region="us-central1" \
   --member="${OPS_AGENT_PRINCIPAL}" \
   --role="roles/run.invoker"
 
 # 3. Deploy Upstream Aether Ops Agent
 DEPLOYER_URL=$(gcloud beta run services describe aether-deployer-agent \
-  --project="your-gcp-project-id" \
+  --project="${PROJECT_ID}" \
   --region="us-central1" \
   --format="value(status.url)")
 
 gcloud beta run deploy aether-ops-agent \
-  --project="your-gcp-project-id" \
-  --image="us-central1-docker.pkg.dev/your-gcp-project-id/aether-repo/aether-ops-agent:latest" \
+  --project="${PROJECT_ID}" \
+  --image="us-central1-docker.pkg.dev/${PROJECT_ID}/aether-repo/aether-ops-agent:latest" \
   --region="us-central1" \
   --platform="managed" \
   --functional-type="agent" \
   --identity-type="agent-identity" \
   --allow-unauthenticated \
-  --set-env-vars="ENVIRONMENT=production,ENFORCE_SPIFFE_AUTH=true,ENFORCE_MTLS=true,PROJECT_ID=your-gcp-project-id,LOCATION=global,GEMINI_MODEL=gemini-3.8-flash,DEPLOYER_AGENT_URL=${DEPLOYER_URL}" \
+  --set-env-vars="ENVIRONMENT=production,ENFORCE_SPIFFE_AUTH=true,ENFORCE_MTLS=true,PROJECT_ID=${PROJECT_ID},LOCATION=global,GEMINI_MODEL=gemini-3.8-flash,DEPLOYER_AGENT_URL=${DEPLOYER_URL}" \
   --set-secrets="HMAC_SECRET=aether-hmac-secret:latest"
 ```
 
@@ -219,7 +223,7 @@ To enforce handshake-level **Mutual TLS (mTLS)** at Google Cloud's edge in front
 ### Step 4.1: Enable Required APIs & Import the SPIFFE `TrustConfig` into Certificate Manager
 [`./generate_mtls_certs.py`](generate_mtls_certs.py) automatically exports `certs/trust-config.yaml` containing the PEM-encoded `spiffe://aether.internal` Root CA (`certs/ca.crt`) and `certs/server-tls-policy.yaml`:
 ```bash
-PROJECT_ID="your-gcp-project-id"
+PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project)}"
 REGION="us-central1"
 
 gcloud services enable \
@@ -345,7 +349,7 @@ for svc in \
   agentregistry.googleapis.com \
   networksecurity.googleapis.com \
   saasservicemgmt.googleapis.com; do
-  gcloud beta services identity create --service="${svc}" --project="your-gcp-project-id"
+  gcloud beta services identity create --service="${svc}" --project="${PROJECT_ID}"
 done
 ```
 
@@ -353,12 +357,12 @@ done
 Register `aether-deployer-agent` in Agent Registry so `aether-ops-agent` can dynamically discover its vetted endpoint URL and IAP resource path:
 ```bash
 DEPLOYER_URL=$(gcloud beta run services describe aether-deployer-agent \
-  --project="your-gcp-project-id" \
+  --project="${PROJECT_ID}" \
   --region="us-central1" \
   --format="value(status.url)")
 
 gcloud alpha agent-registry services create aether-deployer-service \
-  --project="your-gcp-project-id" \
+  --project="${PROJECT_ID}" \
   --location="us-central1" \
   --display-name="Aether Deployer Agent Service" \
   --endpoint-spec-type="no-spec" \
@@ -366,7 +370,7 @@ gcloud alpha agent-registry services create aether-deployer-service \
 
 # Retrieve the generated Agent Registry Endpoint ID
 REGISTRY_ENDPOINT_URI=$(gcloud alpha agent-registry services describe aether-deployer-service \
-  --project="your-gcp-project-id" \
+  --project="${PROJECT_ID}" \
   --location="us-central1" \
   --format="value(registryResource)")
 REGISTRY_ENDPOINT_ID=$(basename "${REGISTRY_ENDPOINT_URI}")
@@ -376,9 +380,9 @@ echo "Registry Endpoint ID: ${REGISTRY_ENDPOINT_ID}"
 ### Step 5.3: Create the Google Cloud Agent Gateway (`aether-ingress-agw`)
 ```bash
 gcloud beta network-services agent-gateways import aether-ingress-agw \
-  --project="your-gcp-project-id" \
-  --location="us-central1" << 'EOF'
-name: projects/your-gcp-project-id/locations/us-central1/agentGateways/aether-ingress-agw
+  --project="${PROJECT_ID}" \
+  --location="us-central1" << EOF
+name: projects/${PROJECT_ID}/locations/us-central1/agentGateways/aether-ingress-agw
 description: Agent Gateway for Aether Ops & Deployer Agents
 protocols:
   - MCP
@@ -392,7 +396,7 @@ Configure an authorization extension targeting `iap.googleapis.com` (`iapPolicyV
 ```bash
 # 1. Create the IAP Authorization Service Extension
 gcloud beta service-extensions authz-extensions import aether-iap-authz-ext \
-  --project="your-gcp-project-id" \
+  --project="${PROJECT_ID}" \
   --location="us-central1" << 'EOF'
 name: aether-iap-authz-ext
 service: iap.googleapis.com
@@ -405,18 +409,18 @@ EOF
 
 # 2. Bind the REQUEST_AUTHZ Policy to the Agent Gateway
 gcloud network-security authz-policies import aether-iap-authz-policy \
-  --project="your-gcp-project-id" \
-  --location="us-central1" << 'EOF'
-name: projects/your-gcp-project-id/locations/us-central1/authzPolicies/aether-iap-authz-policy
+  --project="${PROJECT_ID}" \
+  --location="us-central1" << EOF
+name: projects/${PROJECT_ID}/locations/us-central1/authzPolicies/aether-iap-authz-policy
 target:
   resources:
-    - projects/your-gcp-project-id/locations/us-central1/agentGateways/aether-ingress-agw
+    - projects/${PROJECT_ID}/locations/us-central1/agentGateways/aether-ingress-agw
 policyProfile: REQUEST_AUTHZ
 action: CUSTOM
 customProvider:
   authzExtension:
     resources:
-      - projects/your-gcp-project-id/locations/us-central1/authzExtensions/aether-iap-authz-ext
+      - projects/${PROJECT_ID}/locations/us-central1/authzExtensions/aether-iap-authz-ext
 EOF
 ```
 
@@ -424,7 +428,7 @@ EOF
 Grant the `roles/iap.egressor` role on the registered `aether-deployer-service` endpoint to `aether-ops-agent`'s Agent Identity principal:
 ```bash
 gcloud alpha iap web add-iam-policy-binding \
-  --project="your-gcp-project-id" \
+  --project="${PROJECT_ID}" \
   --resource-type="agent-registry" \
   --region="us-central1" \
   --endpoint="${REGISTRY_ENDPOINT_ID}" \
