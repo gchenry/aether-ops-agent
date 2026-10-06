@@ -1,38 +1,33 @@
 ---
 name: tests
-description: Run the local pytest test suites (.venv/bin/pytest) for aether-ops-agent including SPIFFE/mTLS security tests and LLM evaluations. Use whenever the user asks to run tests, pytests, /tests, or test the agent.
+description: Run the local pytest test suites for aether-ops-agent including SPIFFE/mTLS security tests and LLM evaluations. Use whenever the user asks to run tests, pytests, /tests, or test the agent.
 ---
 
-# Local Pytest Runner (`tests`)
+# Local Test Runner (`tests`)
 
 Run and analyze the local pytest test suites for `aether-ops-agent`.
 
 ## Test Execution
 
-Execute the project's tests using the local virtual environment:
+Execute the project's tests via the runner script, Antigravity CLI, or pytest:
 
 ```bash
-.venv/bin/pytest "$@"
+./run_tests.sh [security|evals|all]
 ```
 
-### Common Targets:
-- **Fast Security Tests Only** (~10s):
-  ```bash
-  .venv/bin/pytest tests/test_security.py
-  ```
-- **Gemini LLM-as-a-Judge Evaluation Tests** (~35s):
-  ```bash
-  .venv/bin/pytest tests/test_agent_evals.py
-  ```
-- **Full Test Suite**:
-  ```bash
-  .venv/bin/pytest
-  ```
-- **Keyword Filter**:
-  ```bash
-  .venv/bin/pytest -k <keyword>
-  ```
+### Execution Methods:
+- **Via Runner Script**:
+  - `./run_tests.sh security` (~11s, 13 SPIFFE/mTLS/ABAC/OWASP ASI tests)
+  - `./run_tests.sh evals` (~35s, 2 Gemini-as-a-Judge evaluations)
+  - `./run_tests.sh all` (Runs all 15 tests)
+- **Via Antigravity CLI**:
+  - `agy tests [security|evals|all]`
+- **Via Slash Command**:
+  - `/tests`
+- **Via Pytest Directly**:
+  - `.venv/bin/pytest tests/test_security.py`
+  - `.venv/bin/pytest tests/test_agent_evals.py`
+  - `.venv/bin/pytest -k <keyword>`
 
 ## Verification
 Inspect the test output, verify all test cases pass, and summarize any assertions, HTTP status mismatches, or SPIFFE/mTLS failures.
-
