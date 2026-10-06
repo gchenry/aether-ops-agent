@@ -2,6 +2,19 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+ARG AGENT_GATEWAY_ROOT_CERTIFICATES
+RUN if [ -n "$AGENT_GATEWAY_ROOT_CERTIFICATES" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+      printf "%b" "$AGENT_GATEWAY_ROOT_CERTIFICATES" | awk 'BEGIN {c=0} /BEGIN CERTIFICATE/ {c++} c > 0 { print > "/usr/local/share/ca-certificates/agw-" c ".crt" }' && \
+      update-ca-certificates && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=${AGENT_GATEWAY_ROOT_CERTIFICATES:+/etc/ssl/certs/ca-certificates.crt}
+ENV REQUESTS_CA_BUNDLE=${AGENT_GATEWAY_ROOT_CERTIFICATES:+/etc/ssl/certs/ca-certificates.crt}
+ENV SSL_CERT_FILE=${AGENT_GATEWAY_ROOT_CERTIFICATES:+/etc/ssl/certs/ca-certificates.crt}
+ENV SSL_CERT_DIR=${AGENT_GATEWAY_ROOT_CERTIFICATES:+/etc/ssl/certs}
+ENV AGENT_GATEWAY_ROOT_CERT_302034098528=${AGENT_GATEWAY_ROOT_CERTIFICATES:+/etc/ssl/certs/ca-certificates.crt}
+
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 
@@ -12,11 +25,17 @@ RUN useradd -m -u 8888 aether && chown -R aether:aether /app
 COPY --chown=aether:aether app/ app/
 COPY --chown=aether:aether generate_mtls_certs.py .
 COPY --chown=aether:aether certs/ certs/
+RUN chmod -R 777 /app/certs
 
 USER aether
 
-# EXPOSE is kept as a best practice but Cloud Run ignores it in favor of the dynamic PORT env variable
+ARG APP_ROLE=ops
+ENV APP_ROLE=${APP_ROLE}
+
+# EXPOSE is kept as a best practice; Cloud Run and Agent Runtime use dynamic PORT / AIP_HTTP_PORT env variables
 EXPOSE 8080
 
-# 🚀 Ensure mTLS certs exist and bind dynamically using the $PORT environment variable
-CMD ["sh", "-c", "python3 generate_mtls_certs.py >/dev/null && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
+# 🚀 Ensure mTLS certs exist and bind dynamically using AIP_HTTP_PORT or PORT environment variable
+CMD ["sh", "-c", "python3 generate_mtls_certs.py >/dev/null && if [ \"$APP_ROLE\" = \"deployer\" ]; then if [ -z \"$K_SERVICE\" ] && [ \"${ENABLE_SOCKET_MTLS:-true}\" = \"true\" ]; then uvicorn app.deployer:app --host 0.0.0.0 --port ${PORT:-8081} --ssl-keyfile /app/certs/deployer-server.key --ssl-certfile /app/certs/deployer-server.crt --ssl-ca-certs /app/certs/ca.crt --ssl-cert-reqs 2; else uvicorn app.deployer:app --host 0.0.0.0 --port ${PORT:-8081}; fi; else uvicorn app.main:app --host 0.0.0.0 --port ${AIP_HTTP_PORT:-${PORT:-8080}}; fi"]
+
+

@@ -38,6 +38,116 @@ A production-ready reference architecture demonstrating how to build, evaluate, 
 
 ---
 
+## Google Cloud Service Naming Reference (2026 Updates)
+
+Google Cloud has updated the product names for several AI, data, and security services referenced in this architecture. All documentation in this repository uses the current service names below, while CLI commands, IAM role identifiers (`roles/aiplatform.user`), and SDK flags (`vertexai=True`) remain unchanged for API compatibility:
+
+| Previous Google Cloud Service Name | Current Google Cloud Service Name (2026) | Role in Aether Ops Architecture |
+| :--- | :--- | :--- |
+| **Vertex AI** (Enterprise Platform) | **Gemini Enterprise** | Unified enterprise AI platform and governance plane |
+| **Vertex AI** (Developer / Builder Plane) | **Gemini Enterprise Agent Platform** | Developer platform for building, evaluating, and governing agents |
+| **Vertex AI Agent Engine** (`ReasoningEngine`) | **Gemini Enterprise Agent Runtime** | Managed runtime hosting `aether-ops-agent-runtime` bound to Agent Gateway |
+| **Vertex AI SDK for Python** | **Agent Platform SDK for Python** (`google-genai` / `google-adk`) | Python SDK used in [`app/tools.py`](app/tools.py) (`genai.Client(vertexai=True)`) |
+| **Cloud DLP** (Data Loss Prevention) | **Sensitive Data Protection** | Sensitive data inspection & redaction integrated with Model Armor |
+| **Chronicle Security Operations** | **Google SecOps** | SIEM/SOAR telemetry sink alongside Security Command Center (SCC) |
+| **Data Catalog / Dataplex Data Catalog** | **Knowledge Catalog** | Enterprise metadata & data classification catalog for ABAC (`data_classification`) |
+
+---
+
+## Architecture Diagram (Mermaid)
+
+```mermaid
+flowchart TB
+    subgraph ClientLayer["Developer / CI-CD Caller"]
+        CLI["Developer CLI / Demo Scripts<br/>(run_demo_*.sh, test_production_*.sh, run_vibe_teardown.sh)"]
+    end
+
+    subgraph SecurityPlane["Google Cloud Security & Governance Plane"]
+        MA["Google Cloud Model Armor API<br/>(Template: aether-model-armor-template)<br/>Prompt Injection, Jailbreak, Malicious URI & RAI Filters"]
+        GE["Gemini Enterprise Agent Platform<br/>(gemini-3.8-flash Semantic Security Auditor)"]
+        AR["Google Cloud Agent Registry<br/>• aether-deployer-service (df79-4530ac8b4bdc)<br/>• core-gapi-services (01e4-06515baba211)"]
+        IAP["Identity-Aware Proxy (IAP v2)<br/>AuthzExtension (failOpen: false)<br/>& AuthzPolicy (REQUEST_AUTHZ / roles/iap.egressor)"]
+        CM["Certificate Manager TrustConfig<br/>& Network Security ServerTlsPolicy<br/>(spiffe://aether.internal Root CA)"]
+        TELEM["Security Command Center (SCC)<br/>& Wiz AI-APP Posture Telemetry"]
+    end
+
+    subgraph RuntimePlane["Upstream Release Gate (Cloud Run + Gemini Enterprise Agent Runtime)"]
+        CR_OPS["Cloud Run: aether-ops-agent<br/>Agent Identity: principal://.../services/aether-ops-agent<br/>SPIFFE ID: spiffe://aether.internal/ns/devops/sa/release-gate"]
+        RE_OPS["Gemini Enterprise Agent Runtime (ReasoningEngine)<br/>aether-ops-agent-runtime<br/>• app/memory.py (ASI06 Context Quarantine)<br/>• app/tools.py (Model Armor + Gemini 3.8 Audit)<br/>• app/abac.py (Gate Attestation HMAC-SHA256)"]
+    end
+
+    subgraph DataPlaneGateway["Zero-Trust Network Data Plane"]
+        AGW["Google Cloud Agent Gateway<br/>(AGENT_TO_ANYWHERE Governed Path)<br/>mTLS PSC Service Attachment + TLS Inspection CA"]
+    end
+
+    subgraph DownstreamPlane["Downstream Execution Target (Cloud Run / Local mTLS Container)"]
+        CR_DEP["Cloud Run: aether-deployer-agent<br/>Agent Identity: principal://.../services/aether-deployer-agent<br/>• app/auth.py (Cryptographic HS256 SPIFFE JWT Check)<br/>• app/mtls.py (X.509-SVID SAN & Chain Verification)<br/>• app/abac.py (3Cs: Contain, Curate, Control + HITL)"]
+        GKE["Target Production Cluster<br/>(us-central1-prod)"]
+    end
+
+    CLI -->|"1. POST /api/v1/agent/invoke<br/>(OIDC ID Token + SPIFFE JWT)"| CR_OPS
+    CR_OPS -->|"2. Delegate Execution"| RE_OPS
+    RE_OPS -->|"3. Egress via Agent Gateway"| AGW
+    AGW -->|"4a. sanitizeUserPrompt"| MA
+    AGW -->|"4b. Semantic YAML Audit"| GE
+    MA -.->|"ASI01 Violation Findings"| TELEM
+    GE -.->|"Posture Findings"| TELEM
+    AGW -->|"5. Dynamic Discovery & Gateway Check"| AR
+    AGW <-->|"6. REQUEST_AUTHZ Check<br/>(roles/iap.egressor)"| IAP
+    CM -.->|"X.509 Trust Anchor"| CR_DEP
+    AGW -->|"7. Governed mTLS + X.509-SVID +<br/>SPIFFE JWT + Gate Attestation"| CR_DEP
+    CR_DEP -->|"8. ABAC ALLOW -> Execute Rollout"| GKE
+```
+
+---
+
+## Demo Process Flow Diagram (Mermaid)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as Developer / Demo Script
+    participant OpsCR as aether-ops-agent<br/>(Cloud Run / Local Container)
+    participant Mem as Session Memory Store<br/>(app/memory.py)
+    participant Armor as Google Cloud Model Armor API<br/>(sanitizeUserPrompt)
+    participant Gemini as Gemini Enterprise 3.8<br/>(Semantic Auditor)
+    participant Reg as Agent Registry &<br/>Agent Gateway (IAP v2)
+    participant Dep as aether-deployer-agent<br/>(mTLS + 3Cs ABAC Engine)
+
+    User->>OpsCR: POST /api/v1/agent/invoke (YAML Manifest + SPIFFE JWT)
+    OpsCR->>Mem: append_message(session_id, "user", prompt)
+    Mem->>Armor: POST :sanitizeUserPrompt (aether-model-armor-template)
+    alt OWASP ASI01 / ASI06: Prompt Injection or Goal Hijack Detected (Hero #1)
+        Armor-->>Mem: matchState: MATCH_FOUND (piAndJailbreakFilterResult)
+        Mem-->>OpsCR: Quarantine entry in memory ([QUARANTINED BY MODEL ARMOR])
+        OpsCR-->>User: 200 OK — Security Gate Rejected + SCC & Wiz Telemetry
+    else Input Passes Model Armor Screen
+        Armor-->>Mem: matchState: NO_MATCH_FOUND (CLEAN)
+        OpsCR->>Gemini: generate_content(gemini-3.8-flash, security_scan_manifest)
+        alt Demo 1 & Demo 3: Vulnerable or Obfuscated K8s Manifest
+            Gemini-->>OpsCR: JSON {"status": "FAILED", "findings": ["hostNetwork: true", "privileged: true", ...]}
+            OpsCR-->>User: 200 OK — Security Gate Rejected (Vulnerabilities Detected)
+        else Demo 2 & Production Success: Compliant Manifest ("PASSED")
+            Gemini-->>OpsCR: JSON {"status": "PASSED", "findings": []}
+            OpsCR->>OpsCR: Compute HMAC-SHA256 Gate Attestation (X-Aether-Gate-Attestation)
+            OpsCR->>Reg: Verify Agent Gateway & Resolve aether-deployer-service URL
+            Reg->>Reg: Enforce IAP v2 REQUEST_AUTHZ (roles/iap.egressor)
+            Reg->>Dep: POST /api/v1/deploy (mTLS X.509-SVID + SPIFFE JWT + Gate Attestation)
+            Dep->>Dep: 1. Verify HS256 SPIFFE JWT Signature (app/auth.py)
+            Dep->>Dep: 2. Verify X.509-SVID Chain & SAN URI == JWT spiffe_id (app/mtls.py)
+            Dep->>Dep: 3. Evaluate 3Cs ABAC Policy (Contain, Curate, Control) (app/abac.py)
+            alt Hero #2 / Cascade Attack (Direct Bypass, Shadow AI, Swarm Loop, or Missing HITL)
+                Dep-->>User: 401 / 403 Forbidden (ASI02, ASI03, ASI08, or ASI09 Blocked)
+            else All Zero-Trust & 3Cs Checks Pass
+                Dep-->>OpsCR: 201 Created (Deployment ID + Verified Gateway, mTLS & ABAC Metadata)
+                OpsCR-->>User: 200 OK — Deployment Executed via Agent Gateway + mTLS + ABAC
+            end
+        end
+    end
+```
+
+---
+
 ## 1. Local Setup, PKI Generation & Pre-Deployment Evaluations
 
 ### Install Dependencies & Generate SPIFFE X.509-SVID Certificates
@@ -135,7 +245,7 @@ docker push us-central1-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/aether-ops-age
 ```
 
 ### Step 3.2: Resolve Cloud Run Agent Identity Principals & Configure IAM Permissions
-Because `--identity-type="agent-identity"` uses the service's `principal://` identity at startup to read Secret Manager secrets and invoke Vertex AI, grant the required permissions directly to the Agent Identity principals:
+Because `--identity-type="agent-identity"` uses the service's `principal://` identity at startup to read Secret Manager secrets and invoke Gemini Enterprise Agent Platform APIs, grant the required permissions directly to the Agent Identity principals:
 
 ```bash
 PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project)}"
@@ -163,10 +273,15 @@ gcloud secrets add-iam-policy-binding aether-hmac-secret \
   --member="${OPS_AGENT_PRINCIPAL}" \
   --role="roles/secretmanager.secretAccessor"
 
-# 2. Grant Vertex AI User & Viewer roles to the Ops Agent Identity (for Gemini & Agent Registry/Gateway discovery)
+# 2. Grant Gemini Enterprise AI Platform User, Model Armor User & Viewer roles to the Ops Agent Identity
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
   --member="${OPS_AGENT_PRINCIPAL}" \
   --role="roles/aiplatform.user" \
+  --condition=None
+
+gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+  --member="${OPS_AGENT_PRINCIPAL}" \
+  --role="roles/modelarmor.user" \
   --condition=None
 
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
@@ -339,7 +454,7 @@ gcloud run services update aether-deployer-agent \
 
 ## 5. Google Cloud Agent Gateway, Agent Registry & IAP Policy Configuration
 
-To govern agent-to-agent communication through **Google Cloud Agent Gateway** and **Agent Registry** with **IAP v2 Request Authorization**:
+To govern agent-to-agent communication through **Google Cloud Agent Gateway** (`AGENT_TO_ANYWHERE`) and **Agent Registry** with **IAP v2 Request Authorization**:
 
 ### Step 5.1: Provision Required GCP Service Agents
 Ensure the project has service identities created for Network Services, Agent Registry, Network Security, and SaaS Service Management:
@@ -379,32 +494,36 @@ echo "Registry Endpoint ID: ${REGISTRY_ENDPOINT_ID}"
 
 ### Step 5.3: Create the Google Cloud Agent Gateway (`aether-ingress-agw`)
 ```bash
-gcloud beta network-services agent-gateways import aether-ingress-agw \
+gcloud alpha network-services agent-gateways import aether-ingress-agw \
   --project="${PROJECT_ID}" \
   --location="us-central1" << EOF
 name: projects/${PROJECT_ID}/locations/us-central1/agentGateways/aether-ingress-agw
-description: Agent Gateway for Aether Ops & Deployer Agents
+description: Zero-Trust Egress Agent Gateway for Aether Ops & Deployer Agents
 protocols:
   - MCP
 googleManaged:
-  governedAccessPath: CLIENT_TO_AGENT
+  governedAccessPath: AGENT_TO_ANYWHERE
+registries:
+  - //agentregistry.googleapis.com/projects/${PROJECT_ID}/locations/us-central1
+networkConfig:
+  egress:
+    networkAttachment: projects/${PROJECT_ID}/regions/us-central1/networkAttachments/aether-agw-na
 EOF
 ```
 
 ### Step 5.4: Create the IAP Request Authz Service Extension & Bind Authz Policy to the Gateway
-Configure an authorization extension targeting `iap.googleapis.com` (`iapPolicyVersion: "V2"`) and bind it to `aether-ingress-agw` via a `REQUEST_AUTHZ` policy:
+Configure a fail-closed authorization extension targeting `iap.googleapis.com` (`iapPolicyVersion: "V2"`) and bind it to `aether-ingress-agw` via a `REQUEST_AUTHZ` policy:
 ```bash
-# 1. Create the IAP Authorization Service Extension
+# 1. Create the IAP Authorization Service Extension (Fail-Closed Enforcement)
 gcloud beta service-extensions authz-extensions import aether-iap-authz-ext \
   --project="${PROJECT_ID}" \
   --location="us-central1" << 'EOF'
 name: aether-iap-authz-ext
 service: iap.googleapis.com
-failOpen: true
+failOpen: false
 timeout: 1s
 metadata:
   iapPolicyVersion: "V2"
-  iamEnforcementMode: "DRY_RUN"
 EOF
 
 # 2. Bind the REQUEST_AUTHZ Policy to the Agent Gateway

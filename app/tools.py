@@ -1,9 +1,13 @@
 """
-Semantic Security Audit Tools built with Gemini models (Gemini Enterprise 3.8).
+Semantic Security Audit Tools built with Gemini models (Gemini Enterprise 3.8)
+and Google Cloud Model Armor API.
 """
 import os
 import json
 from typing import Dict, Any
+import httpx
+import google.auth
+import google.auth.transport.requests
 from google import genai
 from google.genai import types
 
@@ -13,85 +17,124 @@ from app.config import settings
 PROJECT_ID = os.getenv("PROJECT_ID", settings.PROJECT_ID)
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", settings.GEMINI_MODEL)
 LOCATION = "global" if GEMINI_MODEL.startswith("gemini-3") else os.getenv("LOCATION", settings.LOCATION)
+MODEL_ARMOR_LOCATION = os.getenv("MODEL_ARMOR_LOCATION", "us-central1")
+MODEL_ARMOR_TEMPLATE_ID = os.getenv("MODEL_ARMOR_TEMPLATE_ID", "aether-model-armor-template")
 
-# 2. Initialize the GenAI Client (uses ambient Application Default Credentials)
+# 2. Initialize the GenAI Client & Ambient GCP Credentials
 security_client = None
+_gcp_creds = None
+_detected_project_id = None
 
-def get_security_client():
-    global security_client
-    if security_client is None:
-        try:
-            security_client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
-        except Exception:
-            pass
-    return security_client
+
+def _get_gcp_token_and_project() -> tuple[str, str]:
+    """Obtains a live Google Cloud OAuth2 access token and resolves the active GCP project ID."""
+    global _gcp_creds, _detected_project_id
+    resolved_project = (
+        PROJECT_ID if PROJECT_ID and PROJECT_ID != "your-gcp-project-id" else (_detected_project_id or "")
+    )
+    meta_token_url = (
+        "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
+    )
+    meta_proj_url = "http://metadata.google.internal/computeMetadata/v1/project/project-id"
+    try:
+        with httpx.Client(timeout=2.0) as client:
+            if not resolved_project:
+                p_resp = client.get(meta_proj_url, headers={"Metadata-Flavor": "Google"})
+                if p_resp.status_code == 200 and p_resp.text.strip():
+                    resolved_project = p_resp.text.strip()
+                    _detected_project_id = resolved_project
+            t_resp = client.get(meta_token_url, headers={"Metadata-Flavor": "Google"})
+            if t_resp.status_code == 200:
+                tok = t_resp.json().get("access_token")
+                if tok:
+                    return tok, (resolved_project or "your-gcp-project-id")
+    except Exception:
+        pass
+
+    if _gcp_creds is None:
+        _gcp_creds, _detected_project_id = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+    if not _gcp_creds.valid or not _gcp_creds.token:
+        _gcp_creds.refresh(google.auth.transport.requests.Request())
+    if not resolved_project:
+        resolved_project = _detected_project_id or "your-gcp-project-id"
+    return _gcp_creds.token, resolved_project
+
+
+def get_security_client(location_override: str | None = None):
+    from google.oauth2.credentials import Credentials
+
+    token, resolved_project = _get_gcp_token_and_project()
+    loc = location_override or LOCATION
+    creds = Credentials(token=token, quota_project_id=resolved_project)
+    return genai.Client(vertexai=True, project=resolved_project, location=loc, credentials=creds)
 
 
 def model_armor_screen_input(content: str) -> Dict[str, Any]:
     """
-    Screens incoming manifests and prompts using Google Cloud Model Armor rules
-    to detect OWASP ASI01 (Agent Goal Hijacking / Indirect Prompt Injection).
+    Screens incoming manifests and prompts using the live Google Cloud Model Armor API
+    (templates/{MODEL_ARMOR_TEMPLATE_ID}:sanitizeUserPrompt) to detect OWASP ASI01
+    (Agent Goal Hijacking / Indirect Prompt Injection) and malicious URIs.
     """
-    lowered = content.lower()
-    hijack_indicators = [
-        "ignore all prior",
-        "ignore all previous",
-        "system override",
-        "you must output",
-        "emergency bypass",
-        "disregard previous instructions",
-    ]
-    matched = [ind for ind in hijack_indicators if ind in lowered]
-    if matched:
+    token, resolved_project = _get_gcp_token_and_project()
+    template_resource = (
+        f"projects/{resolved_project}/locations/{MODEL_ARMOR_LOCATION}/templates/{MODEL_ARMOR_TEMPLATE_ID}"
+    )
+    url = f"https://modelarmor.{MODEL_ARMOR_LOCATION}.rep.googleapis.com/v1/{template_resource}:sanitizeUserPrompt"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Goog-User-Project": resolved_project,
+        "Content-Type": "application/json",
+    }
+    uncommented = "\n".join(
+        line for line in content.splitlines() if not line.strip().startswith("#")
+    ).strip()
+    screen_text = uncommented if uncommented else content
+    with httpx.Client(timeout=10.0) as client:
+        resp = client.post(url, headers=headers, json={"user_prompt_data": {"text": screen_text}})
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Google Cloud Model Armor API request failed (HTTP {resp.status_code}): {resp.text}"
+        )
+
+    sanitization = resp.json().get("sanitizationResult", {})
+    filter_results = sanitization.get("filterResults", {})
+    pi_res = filter_results.get("pi_and_jailbreak", {}).get("piAndJailbreakFilterResult", {})
+    uri_res = filter_results.get("malicious_uris", {}).get("maliciousUriFilterResult", {})
+
+    if pi_res.get("matchState") == "MATCH_FOUND" or uri_res.get("matchState") == "MATCH_FOUND":
+        confidence = pi_res.get("confidenceLevel", "HIGH")
         return {
             "model_armor_status": "BLOCKED_ASI01_GOAL_HIJACK",
             "finding": (
-                "CRITICAL [OWASP ASI01: Agent Goal Hijacking]: Google Cloud Model Armor intercepted "
-                f"an embedded indirect prompt injection attempting to override agent goal logic "
-                f"(matched indicators: {', '.join(matched)})."
+                "CRITICAL [OWASP ASI01: Agent Goal Hijacking]: Google Cloud Model Armor API "
+                f"({template_resource}:sanitizeUserPrompt) intercepted an embedded indirect prompt "
+                f"injection / jailbreak attempt (confidenceLevel={confidence})."
             ),
             "scc_category": "AGENT_GOAL_HIJACKING_ATTEMPT",
             "wiz_issue_type": "AI-ASI01-PROMPT-INJECTION",
+            "model_armor_template": template_resource,
         }
+
     return {
         "model_armor_status": "CLEAN",
         "finding": None,
         "scc_category": "NONE",
         "wiz_issue_type": "NONE",
+        "model_armor_template": template_resource,
     }
 
 
 def security_scan_manifest(manifest_content: str, environment: str = "production") -> Dict[str, Any]:
     """
-    Leverages Google Cloud Model Armor + Gemini 3.8 to perform a semantic security audit
-    on infrastructure manifests and emit Security Command Center (SCC) & Wiz telemetry.
+    Leverages Google Cloud Model Armor API + Gemini 3.8 on Gemini Enterprise to perform a semantic
+    security audit on infrastructure manifests and emit Security Command Center (SCC) & Wiz telemetry.
     """
-    # 1. Pre-screen with Model Armor for OWASP ASI01: Agent Goal Hijacking
+    # 1. Pre-screen with live Google Cloud Model Armor API for OWASP ASI01: Agent Goal Hijacking
     armor_res = model_armor_screen_input(manifest_content)
     client = get_security_client()
-
-    # Fallback mock scan if Vertex API is offline locally
-    if not client:
-        findings = []
-        if armor_res["finding"]:
-            findings.append(armor_res["finding"])
-        if "api_key" in manifest_content.lower() or "secret" in manifest_content.lower():
-            findings.append("CRITICAL: Hardcoded API Key or Secret detected (Offline fallback).")
-        if findings:
-            return {
-                "status": "FAILED",
-                "model_armor_status": armor_res["model_armor_status"],
-                "scc_telemetry": armor_res["scc_category"],
-                "wiz_posture": armor_res["wiz_issue_type"],
-                "findings": findings,
-            }
-        return {
-            "status": "PASSED",
-            "model_armor_status": "CLEAN",
-            "scc_telemetry": "COMPLIANT",
-            "wiz_posture": "VERIFIED_CLEAN",
-            "findings": ["All checks passed (Offline fallback)."],
-        }
+    _, resolved_project = _get_gcp_token_and_project()
 
     # Define the strict system and auditing rules for Gemini
     audit_prompt = f"""
@@ -159,7 +202,7 @@ def security_scan_manifest(manifest_content: str, environment: str = "production
             if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
                 time.sleep(2 * (attempt + 1))
                 try:
-                    fallback_client = genai.Client(vertexai=True, project=PROJECT_ID, location="us-central1")
+                    fallback_client = get_security_client(location_override="us-central1")
                     response = fallback_client.models.generate_content(
                         model="gemini-2.5-flash",
                         contents=audit_prompt,
@@ -191,7 +234,7 @@ def security_scan_manifest(manifest_content: str, environment: str = "production
             else:
                 break
 
-    # Fallback graceful failure
+    # Fail closed if semantic scan encounters an error
     findings = [f"Security scan failed to execute semantically: {str(last_err)}"]
     if armor_res["finding"]:
         findings.insert(0, armor_res["finding"])
@@ -203,16 +246,3 @@ def security_scan_manifest(manifest_content: str, environment: str = "production
         "findings": findings
     }
 
-
-def request_production_deployment(artifact_id: str, target_cluster: str, actor_id: str) -> Dict[str, Any]:
-    """
-    Simulates a multi-agent orchestration call to the downstream Deployer Agent.
-    """
-    return {
-        "dispatch_status": "QUEUED",
-        "deployment_id": f"dep-{hash(artifact_id) % 1000000:06d}",
-        "artifact_id": artifact_id,
-        "target_cluster": target_cluster,
-        "authorized_by": actor_id,
-        "message": f"Artifact {artifact_id} dispatched to {target_cluster} via secure agent channel."
-    }

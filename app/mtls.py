@@ -257,12 +257,14 @@ def ensure_mtls_certificates(cert_dir: Optional[str] = None, force: bool = False
 def create_mtls_client_context(cert_dir: Optional[str] = None) -> ssl.SSLContext:
     """
     Creates an SSLContext for httpx.Client that:
-    1. Trusts both system CAs (for Google Cloud *.run.app / Load Balancer) and the SPIFFE Root CA (ca.crt).
+    1. Trusts both system CAs (including Google Cloud Agent Gateway TLS Inspection CA) and the SPIFFE Root CA (ca.crt).
     2. Presents the Ops Agent's X.509-SVID Client Certificate (ops-client.crt + ops-client.key).
     """
     paths = ensure_mtls_certificates(cert_dir)
     ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    if os.path.exists("/etc/ssl/certs/ca-certificates.crt"):
+        ctx.load_verify_locations(cafile="/etc/ssl/certs/ca-certificates.crt")
     ctx.load_verify_locations(cafile=str(paths["ca_cert"]))
     ctx.load_cert_chain(
         certfile=str(paths["client_cert"]),

@@ -10,7 +10,7 @@ curl -s -X POST "${SERVICE_URL}/api/v1/agent/invoke" \
 
 echo -e "\n=== 2. Testing Authenticated SPIFFE Identity (Valid DevSecOps Agent) ==="
 # Generate valid token
-VALID_TOKEN=$(python3 -c "import jwt; print(jwt.encode({'spiffe_id': 'spiffe://aether.internal/ns/devops/sa/release-gate', 'role': 'admin'}, 'key', algorithm='HS256'))")
+VALID_TOKEN=$(python3 -c "import jwt; print(jwt.encode({'spiffe_id': 'spiffe://aether.internal/ns/devops/sa/release-gate', 'role': 'admin'}, 'aether-super-secure-demo-secret-key-32-bytes', algorithm='HS256'))")
 
 curl -s -X POST "${SERVICE_URL}/api/v1/agent/invoke" \
   -H "Content-Type: application/json" \

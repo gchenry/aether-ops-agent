@@ -20,16 +20,21 @@ echo -e "\033[1;34m=============================================================
 
 # 1. Verify Agent Gateway Resource
 echo -e "\033[1;33m[1/4] Verifying Google Cloud Agent Gateway (${GATEWAY_NAME})...\033[0m"
-GW_URI=$(gcloud beta network-services agent-gateways describe "${GATEWAY_NAME}" \
+GW_URI=$(gcloud alpha network-services agent-gateways describe "${GATEWAY_NAME}" \
   --project="${PROJECT_ID}" \
   --location="${REGION}" \
   --format="value(name)")
-GW_MODE=$(gcloud beta network-services agent-gateways describe "${GATEWAY_NAME}" \
+GW_MODE=$(gcloud alpha network-services agent-gateways describe "${GATEWAY_NAME}" \
   --project="${PROJECT_ID}" \
   --location="${REGION}" \
   --format="value(googleManaged.governedAccessPath)")
-echo -e "  ✔ Agent Gateway URI:  \033[1;32m${GW_URI}\033[0m"
-echo -e "  ✔ Governed Path Mode: \033[1;32m${GW_MODE}\033[0m"
+GW_PSC=$(gcloud alpha network-services agent-gateways describe "${GATEWAY_NAME}" \
+  --project="${PROJECT_ID}" \
+  --location="${REGION}" \
+  --format="value(agentGatewayCard.mtlsEndpoint)")
+echo -e "  ✔ Agent Gateway URI:      \033[1;32m${GW_URI}\033[0m"
+echo -e "  ✔ Governed Path Mode:     \033[1;32m${GW_MODE}\033[0m"
+echo -e "  ✔ mTLS PSC Attachment:    \033[1;32m${GW_PSC}\033[0m"
 
 # 2. Verify Service Extension & Authz Policy bound to Agent Gateway
 echo -e "\n\033[1;33m[2/4] Verifying IAP Request Authz Policy & Service Extension...\033[0m"
