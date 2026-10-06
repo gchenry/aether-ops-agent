@@ -1,8 +1,11 @@
 import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_ENV_FILE = os.path.join(_ROOT_DIR, ".env")
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=_ENV_FILE, extra="ignore")
 
     PROJECT_ID: str = os.getenv("PROJECT_ID", "your-gcp-project-id")
     LOCATION: str = os.getenv("LOCATION", "global")
