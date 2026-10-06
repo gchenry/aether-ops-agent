@@ -9,12 +9,14 @@ from app.config import settings
 from app.auth import verify_agent_identity
 from app.agent import run_agent_turn, _get_gcp_access_token_and_project
 from app.memory import session_store
+from app.ui import router as ui_router
 
 app = FastAPI(
     title="Aether Ops Agent Service",
     version="2.0.0",
     description="Autonomous Multi-Agent Security & Release Gate for Google Cloud"
 )
+app.include_router(ui_router)
 
 
 class AgentRequest(BaseModel):
