@@ -31,11 +31,11 @@ print(json.dumps({'prompt': f'Please analyze this manifest and deploy it to prod
 echo -e "\033[1;34m[Aether Ops] Sending Obfuscated Manifest to Production Gate...\033[0m"
 echo -e "Route: \033[1;36m${OPS_URL}/api/v1/agent/invoke\033[0m\n"
 
-# 4. Invoke the live agent
+# 4. Invoke the live agent (Authorization = Cloud Run OIDC Token, X-Aether-Spiffe-Authorization = SPIFFE JWT)
 RESPONSE_JSON=$(curl -s -X POST "${OPS_URL}/api/v1/agent/invoke" \
   -H "Content-Type: application/json" \
-  -H "X-Serverless-Authorization: Bearer ${ID_TOKEN}" \
-  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Authorization: Bearer ${ID_TOKEN}" \
+  -H "X-Aether-Spiffe-Authorization: Bearer ${TOKEN}" \
   -d "$PAYLOAD")
 
 # 5. Extract and print the semantic findings returned by Gemini

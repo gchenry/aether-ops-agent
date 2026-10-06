@@ -53,6 +53,7 @@ def health_check():
 def invoke_agent(
     req: AgentRequest,
     authorization: str = Header(None),
+    x_aether_spiffe_authorization: str = Header(None),
     auth_ctx: dict = Depends(verify_agent_identity),
 ):
     re_id = os.getenv("REASONING_ENGINE_ID", "").strip()
@@ -73,7 +74,7 @@ def invoke_agent(
                 json={
                     "prompt": req.prompt,
                     "session_id": req.session_id,
-                    "spiffe_authorization": authorization or "",
+                    "spiffe_authorization": x_aether_spiffe_authorization or authorization or "",
                 },
             )
             if re_resp.status_code == 200:

@@ -40,13 +40,14 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ./generate_mtls_certs.py
+chmod a+r "${HOME}/.config/gcloud/application_default_credentials.json"
 
 docker network create aether-network 2>/dev/null || true
 docker start deployer-container ops-container 2>/dev/null || {
-  docker build -t aether-deployer-agent:latest -f Dockerfile.deployer .
-  docker build -t aether-ops-agent:latest -f Dockerfile .
-  docker run -d --name deployer-container --network aether-network -p 8081:8081 -e ENABLE_SOCKET_MTLS=true -e ENFORCE_MTLS=true aether-deployer-agent:latest
-  docker run -d --name ops-container --user $(id -u):$(id -g) --network aether-network -p 8080:8080 -v "${HOME}/.config/gcloud:/tmp/gcloud:ro" -e GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcloud/application_default_credentials.json -e DEPLOYER_AGENT_URL=https://deployer-container:8081 -e PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project)}" -e LOCATION=global -e GEMINI_MODEL=gemini-3.8-flash aether-ops-agent:latest
+  docker build -t aether-deployer-agent:latest --build-arg APP_ROLE=deployer .
+  docker build -t aether-ops-agent:latest --build-arg APP_ROLE=ops .
+  docker run -d --name deployer-container --network aether-network -p 8081:8081 -e ENABLE_SOCKET_MTLS=true -e ENFORCE_MTLS=true -e PROJECT_ID="${PROJECT_ID:-antigravitydemos-510522}" aether-deployer-agent:latest
+  docker run -d --name ops-container --network aether-network -p 8080:8080 -v "${HOME}/.config/gcloud:/tmp/gcloud:ro" -e GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcloud/application_default_credentials.json -e DEPLOYER_AGENT_URL=https://deployer-container:8081 -e PROJECT_ID="${PROJECT_ID:-antigravitydemos-510522}" -e LOCATION=global -e GEMINI_MODEL=gemini-3.8-flash aether-ops-agent:latest
 }
 
 ./test_production_health.sh
@@ -190,14 +191,25 @@ source .venv/bin/activate
   > * ***PILLAR 02 — CURATE***: *Context Hardening & Gateway filtering with **Google Cloud Agent Gateway**, **Model Armor**, and bounded context windows.*
   > * ***PILLAR 03 — CONTROL***: *Dynamic **ABAC** across tool execution boundaries and continuous runtime monitoring with **Security Command Center (SCC)** and **Wiz AI-APP**."*
 
-### Slide 19: Cloud Run Agent Identity & Agent Gateway Topology
+### Slide 19: Gemini Enterprise Agent Runtime, Cloud Run & Agent Gateway Topology
 * **🎙️ Script**:
-  > *"Look at the 5-step production reference architecture on **Slide 19**:*
-  > * ***STEP 01 (Source)***: *`Aether Ops Agent` runs on Cloud Run with Workload Identity (`principal://agents.global...`) and an Envoy sidecar injecting SPIFFE mTLS client certs.*
-  > * ***STEP 02 (Catalog)***: *`Agent Registry` resolves signed, approved service URIs dynamically.*
-  > * ***STEP 03 (Egress)***: *`Google Cloud Agent Gateway` acts as the egress control point with **IAP v2** evaluating the caller's identity.*
-  > * ***STEP 04 (Edge)***: *`Global Edge ALB` with **Certificate Manager** enforces `ServerTlsPolicy: REJECT_INVALID` for strict mTLS validation.*
-  > * ***STEP 05 (Target)***: *`Aether Deployer Agent` on Cloud Run enforces strict dynamic **ABAC** verification before executing any deployment."*
+  > *"Look at the 5-step production reference architecture deployed live in `antigravitydemos-510522` on **Slide 19**:*
+  > * ***STEP 01 (Ingress & Runtime Identity)***: *Caller requests hit `aether-ops-agent` on Cloud Run with an OIDC ID Token (`Authorization: Bearer`) and an HS256 SPIFFE Workload Token (`X-Aether-Spiffe-Authorization`), which delegates execution to `Gemini Enterprise Agent Runtime` (`ReasoningEngine 8121468146654642176`, Workload Identity `principal://agents.global.org-45060639100.../reasoningEngines/8121468146654642176`).*
+  > * ***STEP 02 (Catalog Discovery)***: *`Agent Registry` dynamically resolves the vetted downstream service URI (`services/aether-deployer-service` $\rightarrow$ `agentregistry-00000000-0000-0000-d0b9-5bbc29bc188e`).*
+  > * ***STEP 03 (Governed Egress Gateway)***: *`Google Cloud Agent Gateway` (`aether-ingress-agw` in `AGENT_TO_ANYWHERE` mode over VPC Network Attachment `aether-agw-na`) intercepts all outbound traffic with TLS Inspection and enforces `Network Security AuthzPolicy` (`aether-iap-authz-policy`).*
+  > * ***STEP 04 (Cryptographic mTLS Chain)***: *`aether-ops-agent` signs outbound handoffs with the shared SPIFFE X.509-SVID (`spiffe://aether.internal/ns/devops/sa/release-gate`) and HMAC-SHA256 `X-Aether-Gate-Attestation`.*
+  > * ***STEP 05 (Downstream Target Enforcement)***: *`aether-deployer-agent` on Cloud Run cryptographically verifies the X.509-SVID signature against `certs/ca.crt`, validates the Agent Registry endpoint (`agentregistry.services.get`), and evaluates the dynamic **3Cs ABAC** policy before executing any deployment."*
+
+```mermaid
+flowchart LR
+    CLI["Caller CLI<br/>OIDC + SPIFFE JWT"] --> OPS["Cloud Run<br/>aether-ops-agent"]
+    OPS --> RE["Gemini Enterprise Agent Runtime<br/>ReasoningEngine 8121468146654642176"]
+    RE --> AGW["Google Cloud Agent Gateway<br/>aether-ingress-agw (AGENT_TO_ANYWHERE)"]
+    AGW --> MA["Model Armor API<br/>aether-model-armor-template"]
+    AGW --> GEM["Gemini Enterprise 3.8<br/>Semantic Security Auditor"]
+    AGW --> REG["Agent Registry<br/>aether-deployer-service"]
+    AGW --> DEP["Cloud Run: aether-deployer-agent<br/>X.509-SVID mTLS + 3Cs ABAC"]
+```
 
 ### Slide 20, Slide 21 & Slide 22: ⚡ LIVE DEMO ACT 3 — *Production Zero-Trust (`test_agent_gateway.sh`), ABAC vs. RBAC, and Model Armor + SCC + Wiz*
 
@@ -205,13 +217,14 @@ source .venv/bin/activate
 Before running the Act 3 CLI demo on **Slide 20**, show these **3 files** in your IDE to connect **Slides 19, 20, 21, and 22** to the actual code:
 
 1. **Open [`app/agent.py`](app/agent.py) (Lines `41–80` and `120–166`)**:
-   * **Show `_resolve_via_agent_gateway_and_registry()` (`L41–80`)**: Show how **Step 02 & Step 03 of Slide 19** work in code—querying `networkservices.googleapis.com/v1beta1/.../agentGateways/aether-ingress-agw` and `agentregistry.googleapis.com/v1alpha/.../services/aether-deployer-service`.
-   * **Show `run_agent_turn()` (`L120–166`)**: Show how the Ops Agent attaches the SPIFFE JWT, the HMAC `X-Aether-Gate-Attestation`, the X.509-SVID client certificate (`create_mtls_client_context()`), and the Cloud Run OIDC `X-Serverless-Authorization` token.
+   * **Show `_resolve_via_agent_gateway_and_registry()` (`L41–80`)**: Show how **Step 02 & Step 03 of Slide 19** work in code—querying `networkservices.googleapis.com/v1alpha1/.../agentGateways/aether-ingress-agw` and `agentregistry.googleapis.com/v1alpha/.../services/aether-deployer-service` directly through the live gateway.
+   * **Show `run_agent_turn()` (`L120–166`)**: Show how the Ops Agent attaches the SPIFFE JWT (`X-Aether-Spiffe-Authorization`), the HMAC `X-Aether-Gate-Attestation`, the X.509-SVID client certificate (`create_mtls_client_context()` + `X-Client-Cert-Pem-B64`), and the Cloud Run OIDC `Authorization` token.
 2. **Open [`app/deployer.py`](app/deployer.py) (Lines `53–129`)**:
-   * **Show `execute_deployment()` (`L53–129`)**: Point out the 3-step zero-trust enforcement on the downstream Deployer service (**Step 04 & Step 05 of Slide 19**):
-     1. Line `67–94`: SPIFFE Non-Human Identity JWT check (**CONTAIN**).
-     2. Line `96–111`: `verify_mtls_client_identity()` verifying the X.509-SVID SAN URI and Cloud Load Balancer `X-Client-Cert-*` headers (**CONTAIN**).
-     3. Line `113–129`: `evaluate_abac_policy()` enforcing the 3Cs at the tool boundary (**CURATE & CONTROL**).
+   * **Show `execute_deployment()` (`L53–129`)**: Point out the 4-step zero-trust enforcement on the downstream Deployer service (**Step 04 & Step 05 of Slide 19**):
+     1. SPIFFE Non-Human Identity JWT signature check (**CONTAIN**).
+     2. `verify_mtls_client_identity()` cryptographically verifying the X.509-SVID signature against `certs/ca.crt` and SAN URI (**CONTAIN**).
+     3. Live Agent Registry service verification (`agentregistry.services.get`) (**CURATE**).
+     4. `evaluate_abac_policy()` enforcing the 3Cs at the tool boundary (**CURATE & CONTROL**).
 3. **Open [`app/abac.py`](app/abac.py) (Lines `25–35` and `76–205`)**:
    * **Show `AUTHORIZED_NHI_POLICIES` (`L25–35`) and `evaluate_abac_policy()` (`L76–205`)**: Connect this directly to **Slide 21 (*Why Static RBAC Fails Autonomous Swarms*)**. Show how every single tool call is evaluated continuously at runtime against `spiffe_id`, `mtls_verified`, `model_armor_status == "CLEAN"`, `swarm_hop_count <= 2`, `gate_attestation`, `environment`, `tenant_id`, `data_classification`, `target_cluster`, and `action_severity`.
 
@@ -225,7 +238,7 @@ source .venv/bin/activate
 ./test_mtls.sh
 
 # 2. Execute Slide 20 Live Demo: Scenario A (Rogue Agent Bypass) & Scenario B (Governed Egress via Agent Gateway)
-./test_agent_gateway.sh --agent=aether-ops
+./test_agent_gateway.sh
 
 # 3. Verify Slide 22 Continuous Runtime Telemetry (Model Armor + SCC + Wiz on Live Cloud Run)
 ./test_production_rejection.sh
@@ -235,14 +248,15 @@ source .venv/bin/activate
 * **From [`./test_mtls.sh`](test_mtls.sh)**:
   * `Unauthenticated TLS connection (no client cert): REJECTED AT TLS HANDSHAKE (Expected)`
   * `Mutual TLS connection (with ops-client.crt): ACCEPTED`
-* **From [`./test_agent_gateway.sh --agent=aether-ops`](test_agent_gateway.sh) (Matches Slide 20 1-for-1!)**:
+* **From [`./test_agent_gateway.sh`](test_agent_gateway.sh) (Matches Slide 20 1-for-1!)**:
   * **`[1/4]` – `[3/4]` Control Plane Verified**:
-    * `✔ Agent Gateway URI: projects/<PROJECT_ID>/locations/us-central1/agentGateways/aether-ingress-agw`
-    * `✔ IAP Authz Extension: projects/.../authzExtensions/aether-iap-authz-ext`
-    * `✔ Authorized IAP Egressor: principal://agents.global.org-.../services/aether-ops-agent`
+    * `✔ Agent Gateway URI: projects/antigravitydemos-510522/locations/us-central1/agentGateways/aether-ingress-agw`
+    * `✔ Egress Net Attachment: projects/antigravitydemos-510522/regions/us-central1/networkAttachments/aether-agw-na`
+    * `✔ Authz Policy Target: projects/698614544349/locations/us-central1/agentGateways/aether-ingress-agw`
+    * `✔ Runtime Agent Identity: principal://agents.global.org-45060639100.system.id.goog/resources/aiplatform/projects/698614544349/locations/us-central1/reasoningEngines/8121468146654642176`
   * **`[4/4]` Slide 20 Scenario A (`Rogue Agent Exploit`)**:
     * `► Scenario A: Rogue Agent Exploit (Direct invocation bypassing Agent Gateway & mTLS)`
-    * `❌ REJECTED AT EDGE: {"detail":"Cryptographic identity verification failed..."}`
+    * `❌ REJECTED AT EDGE: {"detail":"Invalid or forged cryptographic SPIFFE token: Not enough segments"}`
   * **`[4/4]` Slide 20 Scenario B (`Governed Egress Flow`)**:
     * `✔ Workload Attested: principal://agents.global...`
     * `✔ Model Armor: Clean`

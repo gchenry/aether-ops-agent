@@ -3,16 +3,16 @@ FROM python:3.11-slim
 WORKDIR /app
 
 ARG AGENT_GATEWAY_ROOT_CERTIFICATES
-RUN if [ -n "$AGENT_GATEWAY_ROOT_CERTIFICATES" ]; then \
-      apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+    if [ -n "$AGENT_GATEWAY_ROOT_CERTIFICATES" ]; then \
       printf "%b" "$AGENT_GATEWAY_ROOT_CERTIFICATES" | awk 'BEGIN {c=0} /BEGIN CERTIFICATE/ {c++} c > 0 { print > "/usr/local/share/ca-certificates/agw-" c ".crt" }' && \
-      update-ca-certificates && rm -rf /var/lib/apt/lists/*; \
-    fi
+      update-ca-certificates; \
+    fi && rm -rf /var/lib/apt/lists/*
 
-ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=${AGENT_GATEWAY_ROOT_CERTIFICATES:+/etc/ssl/certs/ca-certificates.crt}
-ENV REQUESTS_CA_BUNDLE=${AGENT_GATEWAY_ROOT_CERTIFICATES:+/etc/ssl/certs/ca-certificates.crt}
-ENV SSL_CERT_FILE=${AGENT_GATEWAY_ROOT_CERTIFICATES:+/etc/ssl/certs/ca-certificates.crt}
-ENV SSL_CERT_DIR=${AGENT_GATEWAY_ROOT_CERTIFICATES:+/etc/ssl/certs}
+ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
+ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENV SSL_CERT_DIR=/etc/ssl/certs
 ENV AGENT_GATEWAY_ROOT_CERT_302034098528=${AGENT_GATEWAY_ROOT_CERTIFICATES:+/etc/ssl/certs/ca-certificates.crt}
 
 ENV PYTHONUNBUFFERED=1

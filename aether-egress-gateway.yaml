@@ -1,12 +1,12 @@
-name: "projects/your-gcp-project-id/locations/us-central1/agentGateways/aether-ingress-agw"
+name: "projects/antigravitydemos-510522/locations/us-central1/agentGateways/aether-ingress-agw"
 description: "Zero-Trust Egress Agent Gateway for Aether Ops & Deployer Agents"
 protocols:
   - "MCP"
 googleManaged:
   governedAccessPath: "AGENT_TO_ANYWHERE"
 registries:
-  - "//agentregistry.googleapis.com/projects/your-gcp-project-id/locations/us-central1"
+  - "//agentregistry.googleapis.com/projects/antigravitydemos-510522/locations/us-central1"
 networkConfig:
   egress:
-    networkAttachment: "projects/your-gcp-project-id/regions/us-central1/networkAttachments/aether-agw-na"
+    networkAttachment: "projects/antigravitydemos-510522/regions/us-central1/networkAttachments/aether-agw-na"
 
