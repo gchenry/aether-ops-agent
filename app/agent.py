@@ -22,23 +22,27 @@ MY_SPIFFE_ID = "spiffe://aether.internal/ns/devops/sa/release-gate"
 def _get_gcp_access_token_and_project() -> tuple[str, str]:
     """Obtains a live OAuth2 access token and resolves the active Google Cloud project ID."""
     resolved_project = PROJECT_ID if PROJECT_ID and PROJECT_ID != "your-gcp-project-id" else ""
-    meta_token_url = (
-        "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
+    use_metadata_first = bool(os.getenv("K_SERVICE")) or (
+        os.getenv("RUNNING_IN_REASONING_ENGINE", "").lower() == "true"
     )
-    meta_proj_url = "http://metadata.google.internal/computeMetadata/v1/project/project-id"
-    try:
-        with httpx.Client(timeout=2.5) as client:
-            if not resolved_project:
-                p_resp = client.get(meta_proj_url, headers={"Metadata-Flavor": "Google"})
-                if p_resp.status_code == 200 and p_resp.text.strip():
-                    resolved_project = p_resp.text.strip()
-            t_resp = client.get(meta_token_url, headers={"Metadata-Flavor": "Google"})
-            if t_resp.status_code == 200:
-                tok = t_resp.json().get("access_token")
-                if tok:
-                    return tok, (resolved_project or "your-gcp-project-id")
-    except Exception:
-        pass
+    if use_metadata_first or not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        meta_token_url = (
+            "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
+        )
+        meta_proj_url = "http://metadata.google.internal/computeMetadata/v1/project/project-id"
+        try:
+            with httpx.Client(timeout=2.5) as client:
+                if not resolved_project:
+                    p_resp = client.get(meta_proj_url, headers={"Metadata-Flavor": "Google"})
+                    if p_resp.status_code == 200 and p_resp.text.strip():
+                        resolved_project = p_resp.text.strip()
+                t_resp = client.get(meta_token_url, headers={"Metadata-Flavor": "Google"})
+                if t_resp.status_code == 200:
+                    tok = t_resp.json().get("access_token")
+                    if tok:
+                        return tok, (resolved_project or "your-gcp-project-id")
+        except Exception:
+            pass
 
     creds, detected_project = google.auth.default(
         scopes=["https://www.googleapis.com/auth/cloud-platform"]

@@ -80,7 +80,31 @@ def invoke_agent(
                 },
             )
             if re_resp.status_code == 200:
-                return AgentResponse(**re_resp.json())
+                re_data = re_resp.json()
+                resp_text = re_data.get("response", "")
+                if "Security Gate Rejected" in resp_text:
+                    from app.tools import _emit_scc_and_audit_telemetry
+
+                    is_hijack = "BLOCKED_ASI01_GOAL_HIJACK" in resp_text or "AGENT_GOAL_HIJACKING_ATTEMPT" in resp_text
+                    scc_cat = "AGENT_GOAL_HIJACKING_ATTEMPT" if is_hijack else "POLICY_VIOLATION_DETECTED"
+                    wiz_pos = "AI-ASI01-PROMPT-INJECTION" if is_hijack else "HIGH_RISK_MANIFEST_BLOCKED"
+                    model_armor = "BLOCKED_ASI01_GOAL_HIJACK" if is_hijack else "CLEAN"
+                    lines = [
+                        line.lstrip("- ").strip()
+                        for line in resp_text.splitlines()
+                        if line.strip().startswith("- ") and "Google Cloud Model Armor:" not in line
+                        and "Security Command Center (SCC):" not in line
+                        and "Wiz Cloud Posture Issue:" not in line
+                    ]
+                    _emit_scc_and_audit_telemetry(
+                        category=scc_cat,
+                        severity="CRITICAL" if is_hijack else "HIGH",
+                        findings=lines or ["Security gate rejected deployment manifest."],
+                        model_armor_status=model_armor,
+                        wiz_posture=wiz_pos,
+                        environment=settings.ENVIRONMENT,
+                    )
+                return AgentResponse(**re_data)
             raise RuntimeError(
                 f"Gemini Enterprise Agent Runtime invocation failed (HTTP {re_resp.status_code}): {re_resp.text}"
             )

@@ -32,24 +32,28 @@ def _get_gcp_token_and_project() -> tuple[str, str]:
     resolved_project = (
         PROJECT_ID if PROJECT_ID and PROJECT_ID != "your-gcp-project-id" else (_detected_project_id or "")
     )
-    meta_token_url = (
-        "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
+    use_metadata_first = bool(os.getenv("K_SERVICE")) or (
+        os.getenv("RUNNING_IN_REASONING_ENGINE", "").lower() == "true"
     )
-    meta_proj_url = "http://metadata.google.internal/computeMetadata/v1/project/project-id"
-    try:
-        with httpx.Client(timeout=2.0) as client:
-            if not resolved_project:
-                p_resp = client.get(meta_proj_url, headers={"Metadata-Flavor": "Google"})
-                if p_resp.status_code == 200 and p_resp.text.strip():
-                    resolved_project = p_resp.text.strip()
-                    _detected_project_id = resolved_project
-            t_resp = client.get(meta_token_url, headers={"Metadata-Flavor": "Google"})
-            if t_resp.status_code == 200:
-                tok = t_resp.json().get("access_token")
-                if tok:
-                    return tok, (resolved_project or "your-gcp-project-id")
-    except Exception:
-        pass
+    if use_metadata_first or not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        meta_token_url = (
+            "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
+        )
+        meta_proj_url = "http://metadata.google.internal/computeMetadata/v1/project/project-id"
+        try:
+            with httpx.Client(timeout=2.0) as client:
+                if not resolved_project:
+                    p_resp = client.get(meta_proj_url, headers={"Metadata-Flavor": "Google"})
+                    if p_resp.status_code == 200 and p_resp.text.strip():
+                        resolved_project = p_resp.text.strip()
+                        _detected_project_id = resolved_project
+                t_resp = client.get(meta_token_url, headers={"Metadata-Flavor": "Google"})
+                if t_resp.status_code == 200:
+                    tok = t_resp.json().get("access_token")
+                    if tok:
+                        return tok, (resolved_project or "your-gcp-project-id")
+        except Exception:
+            pass
 
     if _gcp_creds is None:
         _gcp_creds, _detected_project_id = google.auth.default(
@@ -126,6 +130,104 @@ def model_armor_screen_input(content: str) -> Dict[str, Any]:
     }
 
 
+def _emit_scc_and_audit_telemetry(
+    *,
+    category: str,
+    severity: str,
+    findings: list[str],
+    model_armor_status: str,
+    wiz_posture: str,
+    environment: str = "production",
+) -> None:
+    """
+    Emits live structured security telemetry to Google Cloud Logging and triggers
+    Security Command Center (SCC) Event Threat Detection custom modules (and optional
+    SCC v2 custom source findings when SCC_SOURCE_NAME is configured).
+    """
+    if category in ("NONE", "COMPLIANT"):
+        return
+    try:
+        import time
+
+        token, resolved_project = _get_gcp_token_and_project()
+        if not token or not resolved_project or resolved_project == "your-gcp-project-id":
+            return
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-Goog-User-Project": resolved_project,
+            "Content-Type": "application/json",
+        }
+        now_epoch = str(int(time.time()))
+
+        with httpx.Client(timeout=4.0) as client:
+            # 1. Write structured security finding entry to Cloud Logging
+            client.post(
+                "https://logging.googleapis.com/v2/entries:write",
+                headers=headers,
+                json={
+                    "entries": [
+                        {
+                            "logName": f"projects/{resolved_project}/logs/aether-ops-security-gate",
+                            "resource": {
+                                "type": "global",
+                                "labels": {"project_id": resolved_project},
+                            },
+                            "severity": "CRITICAL" if severity == "CRITICAL" else "ERROR",
+                            "jsonPayload": {
+                                "event_type": "AETHER_OPS_SECURITY_GATE_VIOLATION",
+                                "scc_category": category,
+                                "severity": severity,
+                                "model_armor_status": model_armor_status,
+                                "wiz_posture": wiz_posture,
+                                "environment": environment,
+                                "findings": findings,
+                            },
+                        }
+                    ]
+                },
+            )
+
+            # 2. Trigger project-level SCC Event Threat Detection custom module via Admin Activity audit log
+            alert_secret = (
+                "scc-goal-hijack-alert"
+                if category == "AGENT_GOAL_HIJACKING_ATTEMPT"
+                else "scc-policy-violation-alert"
+            )
+            client.patch(
+                f"https://secretmanager.googleapis.com/v1/projects/{resolved_project}/secrets/{alert_secret}?updateMask=labels",
+                headers=headers,
+                json={
+                    "labels": {
+                        "last_triggered": now_epoch,
+                        "scc_category": category.lower()[:63],
+                        "severity": severity.lower()[:63],
+                        "environment": environment.lower()[:63],
+                    }
+                },
+            )
+
+            # 3. Optional direct SCC v2 Custom Source finding creation if SCC_SOURCE_NAME is set
+            scc_source = os.getenv("SCC_SOURCE_NAME", "").strip()
+            if scc_source:
+                finding_id = f"aetherops{now_epoch}"
+                client.post(
+                    f"https://securitycenter.googleapis.com/v2/{scc_source}/locations/global/findings?findingId={finding_id}",
+                    headers=headers,
+                    json={
+                        "state": "ACTIVE",
+                        "severity": severity,
+                        "findingClass": "THREAT" if category == "AGENT_GOAL_HIJACKING_ATTEMPT" else "VULNERABILITY",
+                        "category": category,
+                        "resourceName": f"//cloudresourcemanager.googleapis.com/projects/{resolved_project}",
+                        "description": "; ".join(findings)[:1024],
+                    },
+                )
+    except Exception:
+        # Telemetry emission must never break fail-closed security gate enforcement
+        pass
+
+
 def security_scan_manifest(manifest_content: str, environment: str = "production") -> Dict[str, Any]:
     """
     Leverages Google Cloud Model Armor API + Gemini 3.8 on Gemini Enterprise to perform a semantic
@@ -196,6 +298,15 @@ def security_scan_manifest(manifest_content: str, environment: str = "production
                 if armor_res["finding"]
                 else ("HIGH_RISK_MANIFEST_BLOCKED" if result.get("status") == "FAILED" else "VERIFIED_CLEAN")
             )
+            if result.get("status") == "FAILED":
+                _emit_scc_and_audit_telemetry(
+                    category=result["scc_telemetry"],
+                    severity="CRITICAL" if armor_res["finding"] else "HIGH",
+                    findings=result.get("findings", []),
+                    model_armor_status=result["model_armor_status"],
+                    wiz_posture=result["wiz_posture"],
+                    environment=environment,
+                )
             return result
         except Exception as e:
             last_err = e
@@ -228,21 +339,41 @@ def security_scan_manifest(manifest_content: str, environment: str = "production
                         if armor_res["finding"]
                         else ("HIGH_RISK_MANIFEST_BLOCKED" if result.get("status") == "FAILED" else "VERIFIED_CLEAN")
                     )
+                    if result.get("status") == "FAILED":
+                        _emit_scc_and_audit_telemetry(
+                            category=result["scc_telemetry"],
+                            severity="CRITICAL" if armor_res["finding"] else "HIGH",
+                            findings=result.get("findings", []),
+                            model_armor_status=result["model_armor_status"],
+                            wiz_posture=result["wiz_posture"],
+                            environment=environment,
+                        )
                     return result
                 except Exception:
                     pass
             else:
                 break
 
-    # Fail closed if semantic scan encounters an error
+    # Fail closed if semantic scan encounters an error (or is blocked at gateway by Model Armor FloorSetting)
     findings = [f"Security scan failed to execute semantically: {str(last_err)}"]
     if armor_res["finding"]:
         findings.insert(0, armor_res["finding"])
+    scc_cat = armor_res["scc_category"] if armor_res["finding"] else "SCAN_ERROR"
+    wiz_pos = armor_res["wiz_issue_type"] if armor_res["finding"] else "UNVERIFIED"
+    _emit_scc_and_audit_telemetry(
+        category=scc_cat,
+        severity="CRITICAL" if armor_res["finding"] else "HIGH",
+        findings=findings,
+        model_armor_status=armor_res["model_armor_status"],
+        wiz_posture=wiz_pos,
+        environment=environment,
+    )
     return {
         "status": "FAILED",
         "model_armor_status": armor_res["model_armor_status"],
-        "scc_telemetry": "SCAN_ERROR",
-        "wiz_posture": "UNVERIFIED",
+        "scc_telemetry": scc_cat,
+        "wiz_posture": wiz_pos,
         "findings": findings
     }
+
 
